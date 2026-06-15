@@ -5,7 +5,7 @@ from matplotlib.animation import FuncAnimation
 from scipy import constants
 from scipy.ndimage import gaussian_filter
 from matplotlib import cm, colors as mcolors
-from boat import create_boat_mesh
+from boat import Boat
 
 # ======================
 # 🔹 PARAMÈTRES JONSWAP (à ajuster)
@@ -87,21 +87,12 @@ ax.set_title(f'Surface de mer JONSWAP + Navire (Hs={Hs}m, Tp={Tp}s, γ={gamma})'
 x_boat, y_boat = Lx / 2, Ly / 2
 length, width, height = 20.0, 5.0, 3.0  # Dimensions (m)
 
-# Génère la coque (retournée centrée à l'origine)
-boat_vertices, boat_triangles, boat_color = create_boat_mesh(
-    length=length, width=width, height=height, Nu=25, Nv=9, color='#FFD700'
-)
+# Crée une instance Boat (gère géométrie, couleur, position, rendu)
+boat = Boat(length=length, width=width, height=height, x0=x_boat, y0=y_boat,
+            speed=2.5, Nu=25, Nv=9, color='#8B4513')
 
-# Local boat coordinates (centered) for rotation/translation
-# `create_boat_mesh` returns vertices centered at origin, so keep them as local coords
-boat_local = boat_vertices
-
-# Parameters to animate the boat
-speed = 2.5  # m/s forward speed (increased)
+# Parameters de simulation temporelle
 dt_frame = 0.05  # time per frame (s)
-
-# Placeholder for the plotted boat so we can update/remove it each frame
-boat_plot = None
 
 # ======================
 # 🔹 VARIABLE GLOBALE POUR LA SURFACE
@@ -211,11 +202,9 @@ def update(frame):
     # ======================
     # 4️⃣ Animer et orienter le bateau selon la pente locale
     # ======================
-    global boat_plot
 
-    # Calculer nouvelle position du bateau (avance en X, wrap autour du domaine)
-    x_boat_now = (x_boat + speed * t) % Lx
-    y_boat_now = y_boat
+    # Calculer nouvelle position du bateau (via la classe Boat)
+    x_boat_now, y_boat_now = boat.position_at(t, domain_x=Lx)
 
     # Bilinéar interpolation pour obtenir la hauteur locale de la mer au centre du bateau
     # Trouver indices entourant la position
@@ -247,42 +236,11 @@ def update(frame):
     pitch = -np.arctan(dZdx)
     roll = np.arctan(dZdy)
 
-    # Matrices de rotation
-    Rx = np.array([
-        [1, 0, 0],
-        [0, np.cos(roll), -np.sin(roll)],
-        [0, np.sin(roll), np.cos(roll)]
-    ])
-    Ry = np.array([
-        [np.cos(pitch), 0, np.sin(pitch)],
-        [0, 1, 0],
-        [-np.sin(pitch), 0, np.cos(pitch)]
-    ])
+    # Utiliser la méthode de rendu du bateau (classe Boat)
+    boat.render(ax, pitch, roll, x_boat_now, y_boat_now, z_center)
 
-    R = Ry @ Rx
-
-    # Appliquer rotation + translation aux sommets locaux
-    transformed = (R @ boat_local.T).T + np.array([x_boat_now, y_boat_now, z_center])
-
-    # Retirer ancienne représentation du bateau
-    if boat_plot is not None:
-        try:
-            boat_plot.remove()
-        except Exception:
-            pass
-
-    # Tracer le bateau transformé (utiliser la couleur définie par create_boat_mesh)
-    boat_plot = ax.plot_trisurf(
-        transformed[:, 0], transformed[:, 1], transformed[:, 2],
-        triangles=boat_triangles,
-        color=boat_color, alpha=0.95, linewidth=0.4, edgecolor='black'
-    )
-
-    # ======================
-    # 5️⃣ Retour pour FuncAnimation
-    # ======================
-
-    return current_surf, boat_plot
+    # Retour pour FuncAnimation (on renvoie la surface et l'objet plot du bateau si existant)
+    return current_surf, boat._plot
 
 # ======================
 # 🔹 FONCTION POUR LANCER L'ANIMATION
