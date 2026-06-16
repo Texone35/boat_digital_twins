@@ -10,10 +10,10 @@ from boat import Boat
 # ======================
 # 🔹 PARAMÈTRES JONSWAP (à ajuster)
 # ======================
-Hs = 4.0       # Hauteur significative (m)
+Hs = 3.0       # Hauteur significative (m)
 Tp = 8.0       # Période de pic (s)
 gamma = 3.3    # Facteur de forme (3.3 = JONSWAP standard)
-wind_scale = 1.5  # Facteur de vent / agitation
+wind_scale = 1.0  # Facteur de vent / agitation
 
 g = constants.g  # 9.81 m/s²
 
@@ -91,7 +91,7 @@ length, width, height = 20.0, 5.0, 3.0  # Dimensions (m)
 
 # Crée une instance Boat (gère géométrie, couleur, position, rendu)
 boat = Boat(length=length, width=width, height=height, x0=x_boat, y0=y_boat,
-            speed=2.5, Nu=25, Nv=9, color='#8B4513')
+            speed=2.5, Nu=25, Nv=9, color='#FFD700')
 
 # Parameters de simulation temporelle
 dt_frame = 0.05  # time per frame (s)

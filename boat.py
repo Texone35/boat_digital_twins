@@ -1,7 +1,7 @@
 import numpy as np
 from matplotlib import colors as mcolors
 
-def create_boat_mesh(length=20.0, width=5.0, height=3.0, Nu=25, Nv=9, color='#8B4513'):
+def create_boat_mesh(length=20.0, width=5.0, height=3.0, Nu=25, Nv=9, color='#FFD700'):
     """
     Génère une coque paramétrique centrée à l'origine.
 
@@ -115,9 +115,10 @@ class Boat:
             transformed[:, 0], transformed[:, 1], transformed[:, 2],
             triangles=self.triangles,
             color=self.color,
-            alpha=0.95,
-            linewidth=0.4,
-            edgecolor='black'
+            alpha=1.0,
+            linewidth=1.2,
+            edgecolor='black',
+            antialiased=True
         )
 
         # Tracer la ligne de flottaison approximative
