@@ -10,15 +10,17 @@ from boat import Boat
 # ======================
 # 🔹 PARAMÈTRES JONSWAP (à ajuster)
 # ======================
-Hs = 3.0       # Hauteur significative (m)
+Hs = 4.0       # Hauteur significative (m)
 Tp = 8.0       # Période de pic (s)
 gamma = 3.3    # Facteur de forme (3.3 = JONSWAP standard)
+wind_scale = 1.5  # Facteur de vent / agitation
+
 g = constants.g  # 9.81 m/s²
 
 # ======================
 # 🔹 PARAMÈTRES DE GRID (optimisés pour fluidité)
 # ======================
-Lx, Ly = 200.0, 200.0  # Taille du domaine (m)
+Lx, Ly = 100.0, 100.0  # Taille du domaine (m)
 dx, dy = 4.0, 4.0      # Résolution spatiale (m)
 Nx, Ny = int(Lx / dx) + 1, int(Ly / dy) + 1  # Nombre de points
 
@@ -156,7 +158,7 @@ def update(frame):
 
     # Lissage léger et atténuation pour rendre la mer plus "légère"
     Z_new = gaussian_filter(Z_new, sigma=1.0)
-    Z_new *= 0.6
+    Z_new *= 0.6 * wind_scale
 
     # Créer un colormap plus réaliste et calculer des couleurs de face
     cmap_sea = mcolors.LinearSegmentedColormap.from_list(
