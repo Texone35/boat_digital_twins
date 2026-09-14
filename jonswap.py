@@ -137,6 +137,26 @@ def interpolate_sea_at(Z, xb, yb):
     return z
 
 
+def interpolate_sea_at_batch(Z, xb, yb):
+    """
+    Version vectorisée de interpolate_sea_at pour un tableau de points
+    (xb, yb) — utilisée pour tester l'immersion de chaque sommet de la
+    coque du bateau à chaque frame (coloration dynamique de la carène).
+    """
+    xb = np.asarray(xb, dtype=float)
+    yb = np.asarray(yb, dtype=float)
+    xi = np.clip(xb / dx, 0, Nx - 1)
+    yi = np.clip(yb / dy, 0, Ny - 1)
+    i0 = xi.astype(int); j0 = yi.astype(int)
+    i1 = np.minimum(i0 + 1, Nx - 1); j1 = np.minimum(j0 + 1, Ny - 1)
+    fx, fy = xi - i0, yi - j0
+    z = (Z[j0, i0] * (1 - fx) * (1 - fy)
+         + Z[j0, i1] * fx * (1 - fy)
+         + Z[j1, i0] * (1 - fx) * fy
+         + Z[j1, i1] * fx * fy)
+    return z
+
+
 def sea_gradient_at(Z, xb, yb):
     """
     Gradient local de la surface ∂η/∂x, ∂η/∂y à la position du bateau.
@@ -177,6 +197,33 @@ def get_sea_colors(Z_new):
     base_colors[foam_mask, :3] = np.clip(base_colors[foam_mask, :3] + 0.45, 0, 1)
 
     return base_colors
+
+
+def build_sea_mesh(Z):
+    """
+    Triangule la grille de mer en triangles explicites (2 par maille),
+    avec une couleur moyenne par triangle. Nécessaire pour pouvoir fusionner
+    la mer et le bateau dans une seule Poly3DCollection : mplot3d ne trie
+    par profondeur qu'à l'INTÉRIEUR d'une collection de polygones, jamais
+    entre deux artistes différents (il ne compare que leur profondeur
+    moyenne globale). Sans fusion, la mer ou le bateau serait entièrement
+    devant/derrière l'autre au lieu d'une occlusion correcte localement.
+    """
+    colors = get_sea_colors(Z)                 # (Ny, Nx, 4)
+    V = np.stack([X, Y, Z], axis=-1)            # (Ny, Nx, 3)
+    v00, v10 = V[:-1, :-1], V[:-1, 1:]
+    v01, v11 = V[1:, :-1],  V[1:, 1:]
+    c00, c10 = colors[:-1, :-1], colors[:-1, 1:]
+    c01, c11 = colors[1:, :-1],  colors[1:, 1:]
+
+    tri1 = np.stack([v00, v10, v11], axis=-2).reshape(-1, 3, 3)
+    tri2 = np.stack([v00, v11, v01], axis=-2).reshape(-1, 3, 3)
+    col1 = ((c00 + c10 + c11) / 3.0).reshape(-1, 4)
+    col2 = ((c00 + c11 + c01) / 3.0).reshape(-1, 4)
+
+    tris   = np.concatenate([tri1, tri2], axis=0)
+    tricol = np.concatenate([col1, col2], axis=0)
+    return tris, tricol
 
 
 if __name__ == '__main__':

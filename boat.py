@@ -11,6 +11,9 @@ depuis la vitesse du navire et l'angle de rencontre avec la houle.
 import numpy as np
 from scipy.interpolate import interp1d
 from matplotlib import colors as mcolors
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+import jonswap as _sea
 
 # ────────────────────────────────────────────────
 # CONSTANTES & GÉOMÉTRIE
@@ -44,12 +47,13 @@ C_mat[2, 4] = -rho * g * Awp * x_f
 C_mat[4, 2] =  C_mat[2, 4]
 
 # ────────────────────────────────────────────────
-# PARAMÈTRES DE HOULE
+# PARAMÈTRES DE HOULE — synchronisés avec jonswap.py
+# (même Hs/Tp/direction que la mer réellement générée et affichée)
 # ────────────────────────────────────────────────
-Hs           = 3.0
-Tp           = 8.0
+Hs           = _sea.Hs
+Tp           = _sea.Tp
 omega_p      = 2 * np.pi / Tp
-wave_heading = np.pi / 4   # 45° : excite roll et pitch simultanément
+wave_heading = _sea.theta_mean
 A_wave       = Hs / 2.0
 
 # ────────────────────────────────────────────────
@@ -284,7 +288,17 @@ def state_derivative(t, state, sea_elev=0.0, sea_dzdx=0.0, sea_dzdy=0.0):
            + excitation_forces(t, omega_e, mu, sea_elev, sea_dzdx, sea_dzdy))
 
     nu_dot = np.linalg.solve(MA, rhs)
-    return np.concatenate([nu, nu_dot])
+
+    # Rotation repère navire → repère terrestre pour la position (x,y) uniquement :
+    # sans cela, surge/sway s'intègrent comme des vitesses globales et la trajectoire
+    # ne suit plus le cap dès que le yaw dérive. Les autres DDL (heave/roll/pitch/yaw)
+    # gardent l'approximation petits angles usuelle (eta_dot = nu).
+    cpsi, spsi = np.cos(psi), np.sin(psi)
+    eta_dot = nu.copy()
+    eta_dot[0] = nu[0] * cpsi - nu[1] * spsi
+    eta_dot[1] = nu[0] * spsi + nu[1] * cpsi
+
+    return np.concatenate([eta_dot, nu_dot])
 
 # ────────────────────────────────────────────────
 # INTÉGRATION RK4
@@ -300,52 +314,134 @@ def step_state(state, t, dt, sea_elev=0.0, sea_dzdx=0.0, sea_dzdy=0.0):
 # ────────────────────────────────────────────────
 # GÉOMÉTRIE & RENDU DU BATEAU
 # ────────────────────────────────────────────────
-def create_boat_mesh(length=20.0, width=5.0, height=3.0,
-                     Nu=25, Nv=9, color='#FFD700'):
+def create_boat_mesh(length=L, width=B, draft=T, freeboard=None,
+                     Nu=25, Nv=9):
+    """
+    Maillage de coque dont le plan Z=0 (local) est EXACTEMENT la ligne de
+    flottaison : le point le plus bas (milieu de coque) est à -draft, les
+    extrémités/bords remontent jusqu'à +freeboard. z_center (position de
+    rendu) peut ainsi représenter directement le niveau de mer local.
+    """
+    if freeboard is None:
+        freeboard = 0.15 * draft
     u = np.linspace(-length/2, length/2, Nu)
     v = np.linspace(-width/2,  width/2,  Nv)
     U, V = np.meshgrid(u, v, indexing='ij')
     lf  = np.clip(1-(2*U/length)**2, 0, 1)
     tf  = np.clip(1-(2*np.abs(V)/width)**2, 0, 1)
-    Z   = (height - 1.8*lf*tf) - (height - 1.8*0.5)
+    Z   = freeboard - (draft + freeboard) * lf * tf
     verts = np.vstack([U.flatten(), V.flatten(), Z.flatten()]).T
     tris  = []
     for i in range(Nu-1):
         for j in range(Nv-1):
             idx = i*Nv+j
             tris += [[idx,idx+1,idx+Nv],[idx+1,idx+Nv+1,idx+Nv]]
-    try: mcolors.to_rgb(color)
-    except Exception: color = '#8B4513'
-    return verts, np.array(tris), color
+    return verts, np.array(tris)
 
 
 class Boat:
-    def __init__(self, length=20.0, width=5.0, height=3.0,
-                 x0=0.0, y0=0.0, speed=1.0, Nu=25, Nv=9, color='#8B4513'):
-        self.length=length; self.width=width; self.height=height
+    def __init__(self, length=L, width=B, draft=T, freeboard=None,
+                 x0=0.0, y0=0.0, speed=1.0, Nu=25, Nv=9,
+                 color='#FFD700', underwater_color='#2E8B57'):
+        if freeboard is None:
+            freeboard = 0.15 * draft
+        self.length=length; self.width=width
+        self.draft=draft; self.freeboard=freeboard
         self.x0=x0; self.y0=y0; self.speed=speed
-        self.local_vertices, self.triangles, self.color = create_boat_mesh(
-            length=length, width=width, height=height, Nu=Nu, Nv=Nv, color=color)
+        self.local_vertices, self.triangles = create_boat_mesh(
+            length=length, width=width, draft=draft, freeboard=freeboard,
+            Nu=Nu, Nv=Nv)
+
+        def _valid(c, fallback):
+            try:
+                mcolors.to_rgb(c); return c
+            except Exception:
+                return fallback
+        self.color = _valid(color, '#FFD700')
+        self.underwater_color = _valid(underwater_color, '#2E8B57')
+
+        # Coloration de repli (ligne de flottaison de conception, Z local=0)
+        # utilisée quand render() ne reçoit pas de fonction d'élévation de
+        # mer (sea_elev_fn) — sinon l'immersion réelle est recalculée à
+        # chaque frame dans render(), voir plus bas.
+        # Un triangle n'est classé "immergé" que si ses 3 sommets sont sous
+        # le seuil : un critère sur la moyenne des sommets laisse une
+        # frontière ambiguë (mouchetée), où deux triangles voisins d'un même
+        # carreau peuvent basculer chacun d'un côté différent.
+        tri_local_z = self.local_vertices[self.triangles][:, :, 2]
+        fully_submerged = np.all(tri_local_z < 0, axis=1)
+        self._tri_colors = np.where(fully_submerged,
+                                     self.underwater_color, self.color)
+
         self._plot=None; self._waterline=None
 
-    def render(self, ax, pitch, roll, x_pos, y_pos, z_center, yaw=0.0):
+    def compute_mesh(self, pitch, roll, x_pos, y_pos, z_center, yaw=0.0,
+                      sea_elev_fn=None):
+        """
+        Calcule (sans rien dessiner) les triangles de la coque en position
+        monde, leur couleur, et le contour de la ligne de flottaison.
+
+        sea_elev_fn(x_arr, y_arr) -> élévation locale de la mer (tableau),
+        si fournie : la coloration immergé/émergé est recalculée à cette
+        frame à partir de la vraie surface de mer sous chaque sommet de la
+        coque (immersion dynamique), plutôt que d'utiliser le seuil de
+        conception statique (self._tri_colors).
+
+        Séparé de render() pour permettre de fusionner ces triangles avec
+        ceux de la mer dans une seule Poly3DCollection côté appelant :
+        mplot3d ne trie par profondeur qu'à l'intérieur d'une même
+        collection, jamais entre deux artistes séparés — sans fusion, la
+        mer ou le bateau serait entièrement devant/derrière l'autre au lieu
+        d'une occlusion locale correcte.
+        """
+        Rx=np.array([[1,0,0],[0,np.cos(roll),-np.sin(roll)],[0,np.sin(roll),np.cos(roll)]])
+        Ry=np.array([[np.cos(pitch),0,np.sin(pitch)],[0,1,0],[-np.sin(pitch),0,np.cos(pitch)]])
+        Rz=np.array([[np.cos(yaw),-np.sin(yaw),0],[np.sin(yaw),np.cos(yaw),0],[0,0,1]])
+        verts=(Rz@Ry@Rx@self.local_vertices.T).T+np.array([x_pos,y_pos,z_center])
+        tri_verts = verts[self.triangles]
+
+        if sea_elev_fn is not None:
+            local_elev = sea_elev_fn(verts[:,0], verts[:,1])
+            vertex_submerged = verts[:,2] < local_elev
+            tri_submerged = np.all(vertex_submerged[self.triangles], axis=1)
+            tri_colors = np.where(tri_submerged, self.underwater_color, self.color)
+        else:
+            tri_colors = self._tri_colors
+
+        tol=max(0.05,0.02*(self.draft+self.freeboard))
+        mask=np.abs(verts[:,2]-z_center)<tol; pts=verts[mask]
+        waterline = None
+        if pts.shape[0]>=3:
+            c=pts[:,:2].mean(0)
+            ang=np.arctan2(pts[:,1]-c[1],pts[:,0]-c[0]); p=pts[np.argsort(ang)]
+            xs=np.append(p[:,0],p[0,0]); ys=np.append(p[:,1],p[0,1]); zs=np.append(p[:,2],p[0,2])
+            waterline = (xs, ys, zs)
+
+        return tri_verts, tri_colors, waterline
+
+    def render(self, ax, pitch, roll, x_pos, y_pos, z_center, yaw=0.0,
+               sea_elev_fn=None):
+        """
+        Rendu autonome du bateau seul (sans fusion avec la mer) — pratique
+        pour des tests ou un usage sans occlusion mer/bateau. Pour un rendu
+        avec occlusion correcte, utiliser compute_mesh() et fusionner ses
+        triangles avec ceux de la mer avant de créer la Poly3DCollection
+        (voir main.py).
+        """
         for attr in ('_plot','_waterline'):
             obj=getattr(self,attr)
             if obj is not None:
                 try: obj.remove()
                 except: pass
-        Rx=np.array([[1,0,0],[0,np.cos(roll),-np.sin(roll)],[0,np.sin(roll),np.cos(roll)]])
-        Ry=np.array([[np.cos(pitch),0,np.sin(pitch)],[0,1,0],[-np.sin(pitch),0,np.cos(pitch)]])
-        Rz=np.array([[np.cos(yaw),-np.sin(yaw),0],[np.sin(yaw),np.cos(yaw),0],[0,0,1]])
-        verts=(Rz@Ry@Rx@self.local_vertices.T).T+np.array([x_pos,y_pos,z_center])
-        self._plot=ax.plot_trisurf(verts[:,0],verts[:,1],verts[:,2],
-            triangles=self.triangles,color=self.color,
-            alpha=1.0,linewidth=1.2,edgecolor='black',antialiased=True,zorder=10)
-        tol=max(0.05,0.02*self.height)
-        mask=np.abs(verts[:,2]-z_center)<tol; pts=verts[mask]
-        if pts.shape[0]>=3:
-            c=pts[:,:2].mean(0)
-            ang=np.arctan2(pts[:,1]-c[1],pts[:,0]-c[0]); p=pts[np.argsort(ang)]
-            xs=np.append(p[:,0],p[0,0]); ys=np.append(p[:,1],p[0,1]); zs=np.append(p[:,2],p[0,2])
-            self._waterline=ax.plot(xs,ys,zs,color='k',linewidth=2)[0]
-        else: self._waterline=None
+        tri_verts, tri_colors, waterline = self.compute_mesh(
+            pitch, roll, x_pos, y_pos, z_center, yaw=yaw, sea_elev_fn=sea_elev_fn)
+
+        self._plot=Poly3DCollection(tri_verts,
+            facecolor=tri_colors, edgecolor='black',
+            linewidth=1.2, alpha=1.0, antialiased=True, zorder=10)
+        ax.add_collection3d(self._plot)
+        if waterline is not None:
+            xs, ys, zs = waterline
+            self._waterline=ax.plot(xs,ys,zs,color='k',linewidth=2,zorder=11)[0]
+        else:
+            self._waterline=None
