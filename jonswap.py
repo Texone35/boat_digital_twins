@@ -1,30 +1,34 @@
 import numpy as np
 from scipy import constants
-from scipy.ndimage import gaussian_filter
 from matplotlib import colors as mcolors
 
 # ======================
 # 🔹 PARAMÈTRES JONSWAP
 # ======================
-Hs = 6.0       # Hauteur significative (m)
-Tp = 8.0       # Période de pic (s)
+Hs = 16.0      # Hauteur significative (m) — ouragan (tempête : 12.0, mer agitée : 6.0)
+Tp = 14.0      # Période de pic (s)              — ouragan (tempête : 11.0, agitée : 8.0)
 gamma = 3.3    # Facteur de forme (3.3 = JONSWAP standard)
-wind_scale = 1.5
+wind_scale = 1.0   # 1.0 : Hs de la mer simulée = Hs demandé
 
 g = constants.g  # 9.81 m/s²
 
 # ======================
 # 🔹 PARAMÈTRES DE GRID
 # ======================
-Lx, Ly = 150.0, 150.0
-dx, dy = 4.0, 4.0
+Lx, Ly = 600.0, 600.0   # ≥ 2 longueurs d'onde au pic (λp = g·Tp²/2π ≈ 306 m)
+dx, dy = 4.0, 4.0   # résout les vagues les plus courtes (λ = λp/16 ≈ 19 m à 4·ωp)
 Nx, Ny = int(Lx / dx) + 1, int(Ly / dy) + 1
 
 # ======================
 # 🔹 PARAMÈTRES SPECTRAUX
 # ======================
 N_freq = 30
-N_dir = 15
+N_dir = 17
+
+# Vagues « choppy » (Tessendorf 2001) : déplacement horizontal des points
+# de la surface vers les crêtes → crêtes pointues, creux aplatis.
+# Affichage uniquement : la physique utilise l'élévation eulérienne η(x,y).
+CHOPPINESS = 0.8
 
 # ======================
 # 🔹 GRILLE SPATIALE
@@ -72,6 +76,11 @@ def dispersion_relation(omega, h=np.inf):
 omega_min = 0.5 * (2 * np.pi / Tp)   # ½·ωp
 omega_max = 4.0 * (2 * np.pi / Tp)   # 4·ωp  (couvre l'énergie utile)
 omega = np.linspace(omega_min, omega_max, N_freq)
+domega = omega[1] - omega[0]
+# Fréquences tirées au hasard dans chaque bande dω : casse la périodicité
+# (sinon la mer se répète exactement toutes les 2π/dω ≈ 66 s)
+np.random.seed(42)
+omega = omega + np.random.uniform(-0.5, 0.5, N_freq) * domega
 k = dispersion_relation(omega)
 
 # Directions : distribution cosinus² autour de 0° (cap principal)
@@ -85,20 +94,36 @@ D_theta = cos2 / (cos2.sum() * (theta[1] - theta[0]))  # ∫D dθ = 1
 S_omega = jonswap_spectrum(omega, Hs, Tp, gamma)
 
 # Phases aléatoires
-np.random.seed(42)
 phases = np.random.uniform(0, 2 * np.pi, (N_freq, N_dir))
 
-# Incrément fréquentiel / directionnel
-domega = omega[1] - omega[0]
+# Incrément directionnel
 dtheta = theta[1] - theta[0]
 
 # Pré-calcul des amplitudes A(ω,θ) = √(2 S(ω)·D(θ) dω dθ)
 S2D = S_omega[:, None] * D_theta[None, :]   # (N_freq, N_dir)
 A_amp = np.sqrt(2.0 * S2D * domega * dtheta)   # amplitude de chaque composante
+# Normalisation exacte : Hs = 4·σ_η = 4·√(ΣA²/2). La formule de α ci-dessus
+# ignore le gain d'énergie du pic JONSWAP (≈ ×1.5 pour γ = 3.3).
+A_amp *= Hs / (4.0 * np.sqrt(np.sum(A_amp**2) / 2.0))
 
 # Pré-calcul des vecteurs d'onde (kx, ky)
 kx = k[:, None] * np.cos(theta)[None, :]   # (N_freq, N_dir)
 ky = k[:, None] * np.sin(theta)[None, :]
+
+# Facteurs séparables de la somme spectrale (voir generate_sea_surface) :
+# e^{i(kx·x + ky·y)} = e^{i·ky·y} · e^{i·kx·x}, indépendants du temps donc
+# précalculés une seule fois.  Composantes aplaties : C = N_freq·N_dir.
+# complex64 : produits matriciels ≈2× plus rapides, erreur ~1e-6 m.
+_Ey = np.exp(1j * np.outer(y, ky.ravel())).astype(np.complex64)   # (Ny, C)
+_Ex = np.exp(1j * np.outer(x, kx.ravel())).astype(np.complex64)   # (Nx, C)
+_c0 = (A_amp * np.exp(1j * phases)).ravel()          # (C,)
+_omega_c = np.broadcast_to(omega[:, None], kx.shape).ravel()
+# Coefficients spectraux des 3 champs (η, Dx, Dy) : Dx = −λ ΣA·(kx/k)·sin
+# ⇔ Re[Σ (iλ·kx/k)·c·e^{i(...)}], idem Dy.
+_k_c = np.hypot(kx, ky).ravel()
+_field_coef = np.stack([np.ones_like(_k_c),
+                        1j * CHOPPINESS * kx.ravel() / _k_c,
+                        1j * CHOPPINESS * ky.ravel() / _k_c])   # (3, C)
 
 
 # ======================
@@ -108,17 +133,23 @@ def generate_sea_surface(t):
     """
     Surface η(x,y,t) = ΣΣ A(ω,θ) cos(kx·X + ky·Y − ω·t + φ)
     Retourne Z (Ny, Nx).
+
+    Écrite comme Re[ Ey · diag(A·e^{i(φ−ωt)}) · Exᵀ ] : un seul produit
+    matriciel (Ny×C)(C×Nx) au lieu d'évaluer C·Ny·Nx cosinus par frame.
     """
-    # Phase spatio-temporelle pour chaque composante : (N_freq, N_dir, Ny, Nx)
-    phase_field = (
-        kx[:, :, None, None] * X[None, None, :, :]
-        + ky[:, :, None, None] * Y[None, None, :, :]
-        - omega[:, None, None, None] * t
-        + phases[:, :, None, None]
-    )
-    Z = np.sum(A_amp[:, :, None, None] * np.cos(phase_field), axis=(0, 1))
-    Z = gaussian_filter(Z, sigma=1.0) * wind_scale
-    return Z
+    c_t = (_c0 * np.exp(-1j * _omega_c * t)).astype(np.complex64)
+    return ((_Ey * c_t) @ _Ex.T).real.astype(float) * wind_scale
+
+
+def generate_sea_fields(t):
+    """
+    Champs de mer au temps t pour l'affichage : (Z, Dx, Dy), chacun (Ny, Nx).
+    Z = élévation eulérienne (identique à generate_sea_surface, utilisée par
+    la physique) ; Dx, Dy = déplacements horizontaux « choppy » des sommets.
+    """
+    c_t = (_field_coef * (_c0 * np.exp(-1j * _omega_c * t))).astype(np.complex64)
+    F = ((_Ey[None] * c_t[:, None, :]) @ _Ex.T).real.astype(float) * wind_scale
+    return F[0], F[1], F[2]
 
 
 def interpolate_sea_at(Z, xb, yb):
@@ -171,63 +202,53 @@ def sea_gradient_at(Z, xb, yb):
 # ======================
 # 🔹 COULEURS DE LA MER
 # ======================
-def get_sea_colors(Z_new):
-    cmap_sea = mcolors.LinearSegmentedColormap.from_list(
-        'sea_rich', ['#001f3f', '#003b66', '#006699', '#00aacc', '#bfefff']
-    )
-    zmin, zmax = Z_new.min(), Z_new.max()
-    eps = 1e-6
-    norm_z = (Z_new - zmin) / (zmax - zmin + eps)
-
-    dZ_dy_g, dZ_dx_g = np.gradient(Z_new, dy, dx)
-    normal = np.dstack((-dZ_dx_g, -dZ_dy_g, np.ones_like(Z_new)))
-    nlen = np.linalg.norm(normal, axis=2, keepdims=True)
-    normal /= (nlen + eps)
-
-    light_dir = np.array([0.3, 0.3, 0.9])
-    light_dir /= np.linalg.norm(light_dir)
-    brightness = np.tensordot(normal, light_dir, axes=([2], [0]))
-    brightness = np.clip(brightness, 0.0, 1.0)
-
-    base_colors = cmap_sea(norm_z)
-    base_colors[..., :3] *= (0.5 + 0.6 * brightness[..., None])
-
-    foam_threshold = 0.55
-    foam_mask = Z_new > (foam_threshold * zmax)
-    base_colors[foam_mask, :3] = np.clip(base_colors[foam_mask, :3] + 0.45, 0, 1)
-
-    return base_colors
+_SEA_CMAP = mcolors.LinearSegmentedColormap.from_list(
+    'sea_deep', ['#021526', '#063a5c', '#0f5f7d', '#1f8a9a', '#5cc2c4'])
+_FOAM_RGB = np.array([0.93, 0.96, 0.98])
 
 
-def build_sea_mesh(Z):
+def _smoothstep(e0, e1, v):
+    u = np.clip((v - e0) / (e1 - e0), 0.0, 1.0)
+    return u * u * (3.0 - 2.0 * u)
+
+
+def get_sea_colors_and_normals(Z, Dx, Dy):
     """
-    Triangule la grille de mer en triangles explicites (2 par maille),
-    avec une couleur moyenne par triangle. Nécessaire pour pouvoir fusionner
-    la mer et le bateau dans une seule Poly3DCollection : mplot3d ne trie
-    par profondeur qu'à l'INTÉRIEUR d'une collection de polygones, jamais
-    entre deux artistes différents (il ne compare que leur profondeur
-    moyenne globale). Sans fusion, la mer ou le bateau serait entièrement
-    devant/derrière l'autre au lieu d'une occlusion correcte localement.
+    Couleur RGB (Ny, Nx, 3) et normale unitaire (Ny·Nx, 3) de chaque sommet
+    de la surface affichée P(x,y) = (x + Dx, y + Dy, Z). Les gradients sont
+    calculés une seule fois pour les deux. L'éclairage (reflets, ombrage)
+    est laissé au moteur de rendu : seule la teinte est fixée ici.
+
+    - Teinte : bleu profond dans les creux → turquoise sur les crêtes, sur une
+      échelle fixe liée à Hs (pas de min/max par frame → pas de scintillement).
+    - Écume : là où la surface « choppy » se comprime (jacobien J du
+      déplacement horizontal petit, Tessendorf 2001), c.-à-d. sur les crêtes
+      raides — transition progressive, pas de seuil net.
+    - Normale : n = ∂P/∂x × ∂P/∂y (différences finies).
     """
-    colors = get_sea_colors(Z)                 # (Ny, Nx, 4)
-    V = np.stack([X, Y, Z], axis=-1)            # (Ny, Nx, 3)
-    v00, v10 = V[:-1, :-1], V[:-1, 1:]
-    v01, v11 = V[1:, :-1],  V[1:, 1:]
-    c00, c10 = colors[:-1, :-1], colors[:-1, 1:]
-    c01, c11 = colors[1:, :-1],  colors[1:, 1:]
+    Zy, Zx = np.gradient(Z, dy, dx)
+    dDx_dy, dDx_dx = np.gradient(Dx, dy, dx)
+    dDy_dy, dDy_dx = np.gradient(Dy, dy, dx)
 
-    tri1 = np.stack([v00, v10, v11], axis=-2).reshape(-1, 3, 3)
-    tri2 = np.stack([v00, v11, v01], axis=-2).reshape(-1, 3, 3)
-    col1 = ((c00 + c10 + c11) / 3.0).reshape(-1, 4)
-    col2 = ((c00 + c11 + c01) / 3.0).reshape(-1, 4)
+    h = np.clip(0.5 + Z / (1.2 * Hs * wind_scale), 0.0, 1.0)
+    rgb = _SEA_CMAP(h)[..., :3]
+    J = (1.0 + dDx_dx) * (1.0 + dDy_dy) - dDx_dy * dDy_dx
+    foam = _smoothstep(0.75, 0.35, J) * _smoothstep(0.0, 0.3 * Hs * wind_scale, Z)
+    rgb += (_FOAM_RGB - rgb) * (0.85 * foam[..., None])
 
-    tris   = np.concatenate([tri1, tri2], axis=0)
-    tricol = np.concatenate([col1, col2], axis=0)
-    return tris, tricol
+    n = np.cross(np.stack([1.0 + dDx_dx, dDy_dx, Zx], axis=-1),
+                 np.stack([dDx_dy, 1.0 + dDy_dy, Zy], axis=-1)).reshape(-1, 3)
+    n /= np.linalg.norm(n, axis=1, keepdims=True)
+    return rgb, n
+
+
+def get_sea_colors(Z, Dx, Dy):
+    """Couleur RGB (Ny, Nx, 3) seule — voir get_sea_colors_and_normals."""
+    return get_sea_colors_and_normals(Z, Dx, Dy)[0]
 
 
 if __name__ == '__main__':
     Z = generate_sea_surface(0.0)
     Hs_sim = 4.0 * np.std(Z)
     print(f"Surface générée : {Z.shape}, min={Z.min():.2f}, max={Z.max():.2f}")
-    print(f"Hs simulé ≈ {Hs_sim:.2f} m  (cible : {Hs} m)")
+    print(f"Hs simulé ≈ {Hs_sim:.2f} m  (cible : {Hs * wind_scale} m)")

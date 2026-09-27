@@ -2,10 +2,13 @@
 boat.py — Modèle hydrodynamique 6 DDL basé sur les équations de Cummins (1962).
 
 Équation de Cummins linéarisée (Ogilvie 1964) :
-    [M + A(ω_e)] η̈ + B(ω_e) η̇ + C η = F_exc(ω_e, t)
+    [M + A(ω_e)] η̈ + B(ω_e) η̇ + C η = F_exc
 
 La fréquence de rencontre ω_e est calculée à chaque pas de temps
 depuis la vitesse du navire et l'angle de rencontre avec la houle.
+F_exc est calculée à partir de la mer simulée (jonswap.py) sous la
+flottaison : η (heave, roll, pitch) est donc une position ABSOLUE, par
+rapport au niveau de mer calme.
 """
 
 import numpy as np
@@ -54,7 +57,6 @@ Hs           = _sea.Hs
 Tp           = _sea.Tp
 omega_p      = 2 * np.pi / Tp
 wave_heading = _sea.theta_mean
-A_wave       = Hs / 2.0
 
 # ────────────────────────────────────────────────
 # TABLES DES COEFFICIENTS HYDRODYNAMIQUES A(ω), B(ω)
@@ -170,86 +172,54 @@ def heading_angle(psi, wave_hdg):
     return mu if mu <= np.pi else 2*np.pi - mu
 
 # ────────────────────────────────────────────────
-# RAO(ω_e) — modèle oscillateur amorti
+# HOULE SOUS LA FLOTTAISON — lien avec la mer simulée (jonswap.py)
 # ────────────────────────────────────────────────
-_RAO_ref  = np.array([0.40, 0.25, 0.60, 0.08, 0.10, 0.04])
-_ZETA_RAO = np.array([0.30, 0.30, 0.10, 0.12, 0.08, 0.40])
+# Points d'échantillonnage de la flottaison L×B (repère navire). Grille
+# régulière centrée : les colonnes x, y sont orthogonales, donc le plan des
+# moindres carrés se calcule directement (moyenne + deux projections).
+_wp_x, _wp_y = [a.ravel() for a in np.meshgrid(
+    np.linspace(-L/2, L/2, 11), np.linspace(-B/2, B/2, 5), indexing='ij')]
 
-def rao_at(omega_e, dof):
+def waterplane_wave(Z, x, y, psi):
     """
-    RAO(ω_e) = RAO_ref · H(ω_e) / H(ω_p)
-    H(ω) = 1 / √[(1−r²)² + (2ζr)²]  avec r = ω_e/ω_n
+    Houle vue par la flottaison du navire en (x, y), cap psi : plan des
+    moindres carrés  ζ ≈ ζ̄ + s_x·x_b + s_y·y_b  ajusté sur la surface Z.
+
+    Retourne (ζ̄, s_x, s_y) : élévation moyenne sous la flottaison et pentes
+    longitudinale / transversale dans le repère navire. Moyenner sur toute
+    la flottaison filtre naturellement les vagues courtes devant L.
     """
-    wn  = _omega_n_all[dof]
-    zeta = _ZETA_RAO[dof]
-    def H(w):
-        r = w / wn
-        return 1.0 / np.sqrt((1 - r**2)**2 + (2*zeta*r)**2)
-    return _RAO_ref[dof] * H(omega_e) / H(omega_p)
+    c, s = np.cos(psi), np.sin(psi)
+    xs = x + c*_wp_x - s*_wp_y
+    ys = y + s*_wp_x + c*_wp_y
+    zeta = _sea.interpolate_sea_at_batch(Z, xs % _sea.Lx, ys % _sea.Ly)
+    return (zeta.mean(),
+            np.dot(_wp_x, zeta) / np.dot(_wp_x, _wp_x),
+            np.dot(_wp_y, zeta) / np.dot(_wp_y, _wp_y))
 
 # ────────────────────────────────────────────────
-# FORCES D'EXCITATION DE HOULE — Froude-Krylov + diffraction
+# FORCES D'EXCITATION DE HOULE — Froude-Krylov hydrostatique
 # ────────────────────────────────────────────────
-_rng    = np.random.RandomState(42)
-_phase6 = _rng.uniform(0, 2*np.pi, 6)
-
-def excitation_forces(t, omega_e, mu, sea_elev, sea_dzdx, sea_dzdy):
+def excitation_forces(wave):
     """
-    F_exc_i = X_i(ω_e) · a_eff · cos(ω_e·t + φ_i)
+    F_exc = C · η_houle
 
-    X_i = RAO_i(ω_e) × C_ii_ref  (coefficient d'excitation dimensionnel)
+    η_houle = position (heave, roll, pitch) d'un navire qui épouserait
+    exactement le plan de houle sous sa flottaison. La raideur C tire le
+    navire vers cette position ; masse ajoutée et amortissement B(ω_e)
+    introduisent le retard de phase et atténuent la réponse aux vagues
+    rapides. Surge, sway et yaw ne sont pas excités.
 
-    Les pentes de la mer (sea_dzdx, sea_dzdy) ajoutent un moment
-    de Froude-Krylov directionnel pour roll et pitch.
-
-    IMPORTANT : on n'ajoute pas C_ii·sea_elev ici car le terme
-    de restauration −C·η inclut déjà la flottaison hydrostatique.
-    La surface libre effective est capturée via a_eff.
+    Conventions de signe identiques au rendu (Boat.compute_mesh) :
+      roll  > 0 : bord y > 0 relevé  → roll  = +atan(s_y)
+      pitch > 0 : proue x > 0 baissée → pitch = −atan(s_x)
     """
-    # Amplitude locale effective — bornée à 2·A_wave
-    a_eff = float(np.clip(abs(sea_elev), 1e-3, 2.0 * A_wave))
-    # Signe de l'élévation (phase)
-    sgn   = np.sign(sea_elev) if abs(sea_elev) > 1e-4 else 1.0
-
-    # Pentes locales bornées
-    sx = float(np.clip(sea_dzdx, -0.25, 0.25))
-    sy = float(np.clip(sea_dzdy, -0.25, 0.25))
-
-    F = np.zeros(6)
-
-    # ── Surge (0) — excitation longitudinale faible ──
-    F[0] = (rao_at(omega_e,0) * rho*g*Awp * 0.01
-            * a_eff * np.cos(mu) * np.cos(omega_e*t + _phase6[0]))
-
-    # ── Sway (1) — excitation transversale ──
-    F[1] = (rao_at(omega_e,1) * rho*g*Awp * 0.01
-            * a_eff * np.sin(mu) * np.cos(omega_e*t + _phase6[1]))
-
-    # ── Heave (2) — pression de houle sur la flottaison ──
-    # F_FK = ρg·Awp · a_eff · RAO_heave(ω_e) · cos(ω_e·t)
-    F[2] = (rao_at(omega_e,2) * rho*g*Awp
-            * a_eff * np.cos(omega_e*t + _phase6[2]))
-
-    # ── Roll (3) — moment dû à l'inclinaison transversale de la houle ──
-    # Composante harmonique (RAO)
-    M3_harm  = (rao_at(omega_e,3) * C_mat[3,3]
-                * a_eff * abs(np.sin(mu)) * np.cos(omega_e*t + _phase6[3]))
-    # Composante statique (pente réelle de la mer sous la coque)
-    # M_roll_slope = ρg·∇·(∂η/∂y)·sin(μ)  — moment de Froude-Krylov local
-    M3_slope = C_mat[3,3] * sy * abs(np.sin(mu))
-    F[3] = M3_harm + M3_slope
-
-    # ── Pitch (4) — moment dû à l'inclinaison longitudinale ──
-    M4_harm  = (rao_at(omega_e,4) * C_mat[4,4]
-                * a_eff * abs(np.cos(mu)) * np.cos(omega_e*t + _phase6[4]))
-    M4_slope = C_mat[4,4] * sx * abs(np.cos(mu))
-    F[4] = M4_harm + M4_slope
-
-    # ── Yaw (5) ──
-    F[5] = (rao_at(omega_e,5) * C_mat[4,4] * 0.1
-            * a_eff * np.sin(mu)*np.cos(mu) * np.cos(omega_e*t + _phase6[5]))
-
-    return F
+    zeta, sx, sy = wave
+    eta_wave = np.zeros(6)
+    eta_wave[2] = zeta
+    eta_wave[3] = np.arctan(sy)
+    eta_wave[4] = -np.arctan(sx)
+    return C_mat @ eta_wave
 
 # ────────────────────────────────────────────────
 # MATRICE DE CORIOLIS LINÉARISÉE
@@ -265,11 +235,12 @@ def coriolis_matrix(nu, omega_e):
 # ────────────────────────────────────────────────
 # DÉRIVÉE D'ÉTAT — CUMMINS LINÉARISÉ
 # ────────────────────────────────────────────────
-def state_derivative(t, state, sea_elev=0.0, sea_dzdx=0.0, sea_dzdy=0.0):
+def state_derivative(t, state, wave=(0.0, 0.0, 0.0)):
     """
-    [M + A(ω_e)] η̈ + B(ω_e) η̇ + C η = F_exc(ω_e, t)
+    [M + A(ω_e)] η̈ + B(ω_e) η̇ + C η = F_exc
 
     state = [η(6), η̇(6)]
+    wave  = (ζ̄, s_x, s_y) sous la flottaison, cf. waterplane_wave()
     """
     eta = state[:6]
     nu  = state[6:]
@@ -285,7 +256,7 @@ def state_derivative(t, state, sea_elev=0.0, sea_dzdx=0.0, sea_dzdy=0.0):
     rhs = (- C_mat @ eta
            - Bd @ nu
            - coriolis_matrix(nu, omega_e) @ nu
-           + excitation_forces(t, omega_e, mu, sea_elev, sea_dzdx, sea_dzdy))
+           + excitation_forces(wave))
 
     nu_dot = np.linalg.solve(MA, rhs)
 
@@ -303,8 +274,9 @@ def state_derivative(t, state, sea_elev=0.0, sea_dzdx=0.0, sea_dzdy=0.0):
 # ────────────────────────────────────────────────
 # INTÉGRATION RK4
 # ────────────────────────────────────────────────
-def step_state(state, t, dt, sea_elev=0.0, sea_dzdx=0.0, sea_dzdy=0.0):
-    kw = dict(sea_elev=sea_elev, sea_dzdx=sea_dzdx, sea_dzdy=sea_dzdy)
+def step_state(state, t, dt, wave=(0.0, 0.0, 0.0)):
+    # Houle figée sur le pas dt (échantillonnée une fois par frame)
+    kw = dict(wave=wave)
     k1 = state_derivative(t,          state,              **kw)
     k2 = state_derivative(t+0.5*dt,   state+0.5*dt*k1,   **kw)
     k3 = state_derivative(t+0.5*dt,   state+0.5*dt*k2,   **kw)
@@ -314,41 +286,69 @@ def step_state(state, t, dt, sea_elev=0.0, sea_dzdx=0.0, sea_dzdy=0.0):
 # ────────────────────────────────────────────────
 # GÉOMÉTRIE & RENDU DU BATEAU
 # ────────────────────────────────────────────────
+# Franc-bord / tirant d'eau : navire de charge typique, creux D ≈ 1.5·T,
+# soit un franc-bord D − T ≈ 0.5·T (4 m pour T = 8 m).
+DEFAULT_FREEBOARD_RATIO = 0.5
+
 def create_boat_mesh(length=L, width=B, draft=T, freeboard=None,
                      Nu=25, Nv=9):
     """
-    Maillage de coque dont le plan Z=0 (local) est EXACTEMENT la ligne de
-    flottaison : le point le plus bas (milieu de coque) est à -draft, les
-    extrémités/bords remontent jusqu'à +freeboard. z_center (position de
-    rendu) peut ainsi représenter directement le niveau de mer local.
+    Coque FERMÉE : carène + pont plat. Le plan Z=0 (local) est la ligne de
+    flottaison de conception : la quille (milieu) est à −draft, le livet
+    (bord du pont) à +freeboard.
+
+    - Vue en plan : étrave en pointe (x > 0), arrière légèrement affiné.
+    - Sections pleines (profil en |v|⁴) : murailles quasi verticales, fond
+      plat au milieu ; profil longitudinal en |u|⁴ : corps cylindrique au
+      centre, fonds qui remontent vers l'étrave et l'arrière.
+
+    Retourne (verts, tris, is_deck) — is_deck[i] vrai pour les triangles du
+    pont (couleur propre dans Boat).
     """
     if freeboard is None:
-        freeboard = 0.15 * draft
-    u = np.linspace(-length/2, length/2, Nu)
-    v = np.linspace(-width/2,  width/2,  Nv)
-    U, V = np.meshgrid(u, v, indexing='ij')
-    lf  = np.clip(1-(2*U/length)**2, 0, 1)
-    tf  = np.clip(1-(2*np.abs(V)/width)**2, 0, 1)
-    Z   = freeboard - (draft + freeboard) * lf * tf
-    verts = np.vstack([U.flatten(), V.flatten(), Z.flatten()]).T
-    tris  = []
-    for i in range(Nu-1):
-        for j in range(Nv-1):
-            idx = i*Nv+j
-            tris += [[idx,idx+1,idx+Nv],[idx+1,idx+Nv+1,idx+Nv]]
-    return verts, np.array(tris)
+        freeboard = DEFAULT_FREEBOARD_RATIO * draft
+    xi = np.linspace(-1.0, 1.0, Nu)          # abscisse normalisée (poupe → étrave)
+    # Position transversale normalisée, resserrée vers les murailles (où la
+    # profondeur varie vite) : sinon un seul triangle couvrirait le flanc du
+    # livet jusqu'à mi-profondeur, à cheval sur la flottaison.
+    eta = np.sin(0.5 * np.pi * np.linspace(-1.0, 1.0, Nv))
+    XI, ETA = np.meshgrid(xi, eta, indexing='ij')
+
+    bow   = np.clip((XI - 0.35) / 0.65, 0, 1)
+    stern = np.clip((-XI - 0.70) / 0.30, 0, 1)
+    half_w = 0.5 * width * np.sqrt(1 - bow**2) * (1 - 0.3 * stern**2)
+
+    U = 0.5 * length * XI
+    V = ETA * half_w
+    depth = (1 - XI**4) * (1 - np.abs(ETA)**4)
+    Z_hull = freeboard - (draft + freeboard) * depth
+
+    n = Nu * Nv
+    verts = np.vstack([
+        np.column_stack([U.ravel(), V.ravel(), Z_hull.ravel()]),
+        np.column_stack([U.ravel(), V.ravel(), np.full(n, freeboard)]),
+    ])
+    idx = (np.arange(Nu - 1)[:, None] * Nv + np.arange(Nv - 1)[None, :]).ravel()
+    quads_a = np.column_stack([idx, idx + 1, idx + Nv])
+    quads_b = np.column_stack([idx + 1, idx + Nv + 1, idx + Nv])
+    hull = np.vstack([quads_a, quads_b])
+    deck = hull[:, ::-1] + n                 # même grille, orientation inversée
+    tris = np.vstack([hull, deck])
+    is_deck = np.r_[np.zeros(len(hull), bool), np.ones(len(deck), bool)]
+    return verts, tris, is_deck
 
 
 class Boat:
     def __init__(self, length=L, width=B, draft=T, freeboard=None,
                  x0=0.0, y0=0.0, speed=1.0, Nu=25, Nv=9,
-                 color='#FFD700', underwater_color='#2E8B57'):
+                 color='#FFD700', underwater_color='#2E8B57',
+                 deck_color='#9C7A54'):
         if freeboard is None:
-            freeboard = 0.15 * draft
+            freeboard = DEFAULT_FREEBOARD_RATIO * draft
         self.length=length; self.width=width
         self.draft=draft; self.freeboard=freeboard
         self.x0=x0; self.y0=y0; self.speed=speed
-        self.local_vertices, self.triangles = create_boat_mesh(
+        self.local_vertices, self.triangles, self._is_deck = create_boat_mesh(
             length=length, width=width, draft=draft, freeboard=freeboard,
             Nu=Nu, Nv=Nv)
 
@@ -359,6 +359,9 @@ class Boat:
                 return fallback
         self.color = _valid(color, '#FFD700')
         self.underwater_color = _valid(underwater_color, '#2E8B57')
+        self.deck_color = _valid(deck_color, '#9C7A54')
+        # Couleur hors de l'eau : pont ou coque
+        self._dry_colors = np.where(self._is_deck, self.deck_color, self.color)
 
         # Coloration de repli (ligne de flottaison de conception, Z local=0)
         # utilisée quand render() ne reçoit pas de fonction d'élévation de
@@ -371,7 +374,7 @@ class Boat:
         tri_local_z = self.local_vertices[self.triangles][:, :, 2]
         fully_submerged = np.all(tri_local_z < 0, axis=1)
         self._tri_colors = np.where(fully_submerged,
-                                     self.underwater_color, self.color)
+                                     self.underwater_color, self._dry_colors)
 
         self._plot=None; self._waterline=None
 
@@ -398,13 +401,15 @@ class Boat:
         Ry=np.array([[np.cos(pitch),0,np.sin(pitch)],[0,1,0],[-np.sin(pitch),0,np.cos(pitch)]])
         Rz=np.array([[np.cos(yaw),-np.sin(yaw),0],[np.sin(yaw),np.cos(yaw),0],[0,0,1]])
         verts=(Rz@Ry@Rx@self.local_vertices.T).T+np.array([x_pos,y_pos,z_center])
+        self.world_vertices = verts   # sommets partagés (indexés par self.triangles)
         tri_verts = verts[self.triangles]
 
         if sea_elev_fn is not None:
             local_elev = sea_elev_fn(verts[:,0], verts[:,1])
             vertex_submerged = verts[:,2] < local_elev
             tri_submerged = np.all(vertex_submerged[self.triangles], axis=1)
-            tri_colors = np.where(tri_submerged, self.underwater_color, self.color)
+            tri_colors = np.where(tri_submerged, self.underwater_color,
+                                  self._dry_colors)
         else:
             tri_colors = self._tri_colors
 
