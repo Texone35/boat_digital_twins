@@ -2,20 +2,12 @@ import numpy as np
 from scipy import constants
 from matplotlib import colors as mcolors
 
-# ======================
-# 🔹 PARAMÈTRES JONSWAP
-# ======================
-Hs = 16.0      # Hauteur significative (m) — ouragan (tempête : 12.0, mer agitée : 6.0)
-Tp = 14.0      # Période de pic (s)              — ouragan (tempête : 11.0, agitée : 8.0)
-gamma = 3.3    # Facteur de forme (3.3 = JONSWAP standard)
-wind_scale = 1.0   # 1.0 : Hs de la mer simulée = Hs demandé
-
 g = constants.g  # 9.81 m/s²
 
 # ======================
-# 🔹 PARAMÈTRES DE GRID
+# 🔹 PARAMÈTRES DE GRID (fixes : la grille ne change jamais)
 # ======================
-Lx, Ly = 600.0, 600.0   # ≥ 2 longueurs d'onde au pic (λp = g·Tp²/2π ≈ 306 m)
+Lx, Ly = 600.0, 600.0   # ≥ 2 longueurs d'onde au pic (λp = g·Tp²/2π ≈ 306 m à Tp = 14 s)
 dx, dy = 4.0, 4.0   # résout les vagues les plus courtes (λ = λp/16 ≈ 19 m à 4·ωp)
 Nx, Ny = int(Lx / dx) + 1, int(Ly / dy) + 1
 
@@ -24,11 +16,36 @@ Nx, Ny = int(Lx / dx) + 1, int(Ly / dy) + 1
 # ======================
 N_freq = 30
 N_dir = 17
+# Composantes plus courtes que 3 mailles : mal résolues par la grille
+# (repliement de spectre aux petits Tp) → amplitude mise à zéro.
+K_MAX = 2 * np.pi / (3 * dx)
 
-# Vagues « choppy » (Tessendorf 2001) : déplacement horizontal des points
-# de la surface vers les crêtes → crêtes pointues, creux aplatis.
-# Affichage uniquement : la physique utilise l'élévation eulérienne η(x,y).
-CHOPPINESS = 0.8
+# ======================
+# 🔹 ÉTAT DE MER PAR DÉFAUT ET PRÉRÉGLAGES
+# ======================
+# Hs : hauteur significative (m) ; Tp : période de pic (s) ; gamma : facteur
+# de forme (3.3 = JONSWAP standard) ; theta_mean : direction de propagation
+# (rad, 0 = vers +x) ; spread : exposant s de D(θ) ∝ cos^{2s}(θ − θ_mean)
+# (grand = houle plus unidirectionnelle) ; choppiness : vagues « choppy »
+# (Tessendorf 2001), affichage uniquement — la physique utilise η(x,y).
+DEFAULTS = dict(Hs=16.0, Tp=14.0, gamma=3.3, theta_mean=0.0,
+                spread=1.0, choppiness=0.8)
+
+SEA_PRESETS = {
+    'Calme':   dict(Hs=1.0,  Tp=6.0),
+    'Agitée':  dict(Hs=6.0,  Tp=8.0),
+    'Tempête': dict(Hs=12.0, Tp=11.0),
+    'Ouragan': dict(Hs=16.0, Tp=14.0),
+}
+
+# Constante de temps des transitions d'état de mer (s) : un changement de
+# paramètre est atteint à 63 % après TAU, sans saut de la surface.
+TAU = 3.0
+# Écart en dessous duquel un paramètre rejoint directement sa cible
+_SNAP = dict(Hs=0.01, Tp=0.01, gamma=0.01, theta_mean=np.radians(0.2),
+             spread=0.01, choppiness=0.005)
+# Paramètres qui changent ω ou k : facteurs spatiaux à recalculer
+_GEOMETRIC = ('Tp', 'theta_mean')
 
 # ======================
 # 🔹 GRILLE SPATIALE
@@ -70,86 +87,165 @@ def dispersion_relation(omega, h=np.inf):
             k0 = omega ** 2 / (g * np.tanh(k0 * h))
         return k0
 
-# ======================
-# 🔹 PRÉ-CALCULS SPECTRAUX
-# ======================
-omega_min = 0.5 * (2 * np.pi / Tp)   # ½·ωp
-omega_max = 4.0 * (2 * np.pi / Tp)   # 4·ωp  (couvre l'énergie utile)
-omega = np.linspace(omega_min, omega_max, N_freq)
-domega = omega[1] - omega[0]
-# Fréquences tirées au hasard dans chaque bande dω : casse la périodicité
-# (sinon la mer se répète exactement toutes les 2π/dω ≈ 66 s)
-np.random.seed(42)
-omega = omega + np.random.uniform(-0.5, 0.5, N_freq) * domega
-k = dispersion_relation(omega)
-
-# Directions : distribution cosinus² autour de 0° (cap principal)
-theta_mean = 0.0
-theta = np.linspace(theta_mean - np.pi / 2, theta_mean + np.pi / 2, N_dir)
-
-# Spectre directionnel : D(θ) ∝ cos²(θ - θ_mean), normalisé
-cos2 = np.cos(theta - theta_mean) ** 2
-D_theta = cos2 / (cos2.sum() * (theta[1] - theta[0]))  # ∫D dθ = 1
-
-S_omega = jonswap_spectrum(omega, Hs, Tp, gamma)
-
-# Phases aléatoires
-phases = np.random.uniform(0, 2 * np.pi, (N_freq, N_dir))
-
-# Incrément directionnel
-dtheta = theta[1] - theta[0]
-
-# Pré-calcul des amplitudes A(ω,θ) = √(2 S(ω)·D(θ) dω dθ)
-S2D = S_omega[:, None] * D_theta[None, :]   # (N_freq, N_dir)
-A_amp = np.sqrt(2.0 * S2D * domega * dtheta)   # amplitude de chaque composante
-# Normalisation exacte : Hs = 4·σ_η = 4·√(ΣA²/2). La formule de α ci-dessus
-# ignore le gain d'énergie du pic JONSWAP (≈ ×1.5 pour γ = 3.3).
-A_amp *= Hs / (4.0 * np.sqrt(np.sum(A_amp**2) / 2.0))
-
-# Pré-calcul des vecteurs d'onde (kx, ky)
-kx = k[:, None] * np.cos(theta)[None, :]   # (N_freq, N_dir)
-ky = k[:, None] * np.sin(theta)[None, :]
-
-# Facteurs séparables de la somme spectrale (voir generate_sea_surface) :
-# e^{i(kx·x + ky·y)} = e^{i·ky·y} · e^{i·kx·x}, indépendants du temps donc
-# précalculés une seule fois.  Composantes aplaties : C = N_freq·N_dir.
-# complex64 : produits matriciels ≈2× plus rapides, erreur ~1e-6 m.
-_Ey = np.exp(1j * np.outer(y, ky.ravel())).astype(np.complex64)   # (Ny, C)
-_Ex = np.exp(1j * np.outer(x, kx.ravel())).astype(np.complex64)   # (Nx, C)
-_c0 = (A_amp * np.exp(1j * phases)).ravel()          # (C,)
-_omega_c = np.broadcast_to(omega[:, None], kx.shape).ravel()
-# Coefficients spectraux des 3 champs (η, Dx, Dy) : Dx = −λ ΣA·(kx/k)·sin
-# ⇔ Re[Σ (iλ·kx/k)·c·e^{i(...)}], idem Dy.
-_k_c = np.hypot(kx, ky).ravel()
-_field_coef = np.stack([np.ones_like(_k_c),
-                        1j * CHOPPINESS * kx.ravel() / _k_c,
-                        1j * CHOPPINESS * ky.ravel() / _k_c])   # (3, C)
-
 
 # ======================
-# 🔹 GÉNÉRATION DE LA SURFACE (vectorisée)
+# 🔹 ÉTAT DE MER RECONFIGURABLE EN DIRECT
 # ======================
-def generate_sea_surface(t):
+class SeaState:
     """
-    Surface η(x,y,t) = ΣΣ A(ω,θ) cos(kx·X + ky·Y − ω·t + φ)
-    Retourne Z (Ny, Nx).
+    Mer JONSWAP directionnelle dont les paramètres se modifient en cours
+    de simulation.
 
-    Écrite comme Re[ Ey · diag(A·e^{i(φ−ωt)}) · Exᵀ ] : un seul produit
-    matriciel (Ny×C)(C×Nx) au lieu d'évaluer C·Ny·Nx cosinus par frame.
-    """
-    c_t = (_c0 * np.exp(-1j * _omega_c * t)).astype(np.complex64)
-    return ((_Ey * c_t) @ _Ex.T).real.astype(float) * wind_scale
+    Surface η(x,y,t) = ΣΣ A(ω,θ) cos(kx·x + ky·y − ω·t + φ), écrite comme
+    Re[ Ey · diag(A·e^{i(φ−ωt)}) · Exᵀ ] : un seul produit matriciel
+    (Ny×C)(C×Nx) au lieu d'évaluer C·Ny·Nx cosinus par frame.
 
+    Les tirages aléatoires (décalages de fréquence, phases) sont faits une
+    seule fois : la mer garde sa « personnalité » quand ses paramètres
+    changent. set_target() fixe une cible, advance() s'en rapproche
+    progressivement (constante de temps TAU).
+    """
 
-def generate_sea_fields(t):
-    """
-    Champs de mer au temps t pour l'affichage : (Z, Dx, Dy), chacun (Ny, Nx).
-    Z = élévation eulérienne (identique à generate_sea_surface, utilisée par
-    la physique) ; Dx, Dy = déplacements horizontaux « choppy » des sommets.
-    """
-    c_t = (_field_coef * (_c0 * np.exp(-1j * _omega_c * t))).astype(np.complex64)
-    F = ((_Ey[None] * c_t[:, None, :]) @ _Ex.T).real.astype(float) * wind_scale
-    return F[0], F[1], F[2]
+    def __init__(self, seed=42, **params):
+        p = dict(DEFAULTS)
+        p.update(params)
+        self.params = p
+        self.target = dict(p)
+
+        rng = np.random.RandomState(seed)
+        # Fréquences tirées au hasard dans chaque bande dω : casse la
+        # périodicité (sinon la mer se répète toutes les 2π/dω ≈ 66 s)
+        self._jitter = rng.uniform(-0.5, 0.5, N_freq)
+        self._phi = rng.uniform(0, 2 * np.pi, N_freq * N_dir)
+
+        # Instant et point (en général le bateau) où la surface est gardée
+        # continue lors d'un changement de ω ou de k
+        self._t = 0.0
+        self._ref = (Lx / 2, Ly / 2)
+        self._omega_c = None
+        self._build_geometry()
+        self._build_amplitudes()
+
+    # ── Accès aux paramètres courants ──
+    Hs = property(lambda self: self.params['Hs'])
+    Tp = property(lambda self: self.params['Tp'])
+    gamma = property(lambda self: self.params['gamma'])
+    theta_mean = property(lambda self: self.params['theta_mean'])
+    omega_p = property(lambda self: 2 * np.pi / self.params['Tp'])
+
+    def _build_geometry(self):
+        """Fréquences, directions, vecteurs d'onde et facteurs e^{i·k·x}."""
+        p = self.params
+        wp = 2 * np.pi / p['Tp']
+        w = np.linspace(0.5 * wp, 4.0 * wp, N_freq)   # ½·ωp → 4·ωp (énergie utile)
+        dw = w[1] - w[0]
+        w = w + self._jitter * dw
+        theta = p['theta_mean'] + np.linspace(-np.pi / 2, np.pi / 2, N_dir)
+        k = dispersion_relation(w)
+        kx = (k[:, None] * np.cos(theta)[None, :]).ravel()   # composantes aplaties
+        ky = (k[:, None] * np.sin(theta)[None, :]).ravel()   # C = N_freq·N_dir
+        omega_c = np.repeat(w, N_dir)
+
+        if self._omega_c is not None:
+            # Continuité de phase : chaque composante garde la même phase à
+            # l'instant courant et au point de référence,
+            # φ' = φ + (ω' − ω)·t − (k' − k)·x_ref
+            xr, yr = self._ref
+            self._phi = self._phi + ((omega_c - self._omega_c) * self._t
+                                     - (kx - self._kx) * xr
+                                     - (ky - self._ky) * yr)
+
+        self.omega, self.domega, self.k = w, dw, k
+        self.theta, self.dtheta = theta, theta[1] - theta[0]
+        self._omega_c, self._kx, self._ky = omega_c, kx, ky
+        self._k_c = np.hypot(kx, ky)
+        # Facteurs séparables, indépendants du temps. complex64 : produits
+        # matriciels ≈2× plus rapides, erreur ~1e-6 m.
+        self._Ey = np.exp(1j * np.outer(y, ky)).astype(np.complex64)   # (Ny, C)
+        self._Ex = np.exp(1j * np.outer(x, kx)).astype(np.complex64)   # (Nx, C)
+
+    def _build_amplitudes(self):
+        """Amplitudes A(ω,θ) = √(2 S(ω)·D(θ) dω dθ) et coefficients choppy."""
+        p = self.params
+        S = jonswap_spectrum(self.omega, p['Hs'], p['Tp'], p['gamma'])
+        # cos ≥ 0 sur ±π/2 autour de θ_mean (clip : arrondis négatifs aux bords)
+        c = np.clip(np.cos(self.theta - p['theta_mean']), 0.0, None) ** (2 * p['spread'])
+        D = c / (c.sum() * self.dtheta)                       # ∫D dθ = 1
+        A = np.sqrt(2.0 * S[:, None] * D[None, :] * self.domega * self.dtheta)
+        A[self.k > K_MAX, :] = 0.0
+        # Normalisation exacte : Hs = 4·σ_η = 4·√(ΣA²/2). La formule de α
+        # ignore le gain d'énergie du pic JONSWAP (≈ ×1.5 pour γ = 3.3).
+        A *= p['Hs'] / (4.0 * np.sqrt(np.sum(A**2) / 2.0))
+        self._A = A.ravel()
+        # Coefficients spectraux des 3 champs (η, Dx, Dy) : Dx = −λ ΣA·(kx/k)·sin
+        # ⇔ Re[Σ (iλ·kx/k)·c·e^{i(...)}], idem Dy.
+        lam = p['choppiness']
+        self._field_coef = np.stack([np.ones_like(self._k_c),
+                                     1j * lam * self._kx / self._k_c,
+                                     1j * lam * self._ky / self._k_c])   # (3, C)
+
+    # ── Pilotage en direct ──
+    def set_target(self, **params):
+        """Nouvelle cible pour un ou plusieurs paramètres (transition douce)."""
+        for key, v in params.items():
+            if key not in self.target:
+                raise KeyError(f'paramètre de mer inconnu : {key}')
+            self.target[key] = float(v)
+
+    def set_params(self, **params):
+        """Changement immédiat (sans transition)."""
+        self.set_target(**params)
+        self.advance(np.inf)
+
+    def advance(self, dt, ref=None):
+        """
+        Rapproche les paramètres courants de la cible sur une durée dt (s).
+        ref = (x, y) : point où la surface reste continue (le bateau).
+        Retourne True si la mer a changé.
+        """
+        if ref is not None:
+            self._ref = ref
+        a = 1.0 - np.exp(-dt / TAU)
+        geom = changed = False
+        for key, q in self.target.items():
+            p = self.params[key]
+            d = q - p
+            if key == 'theta_mean':
+                d = (d + np.pi) % (2 * np.pi) - np.pi        # plus court chemin
+            if d == 0.0:
+                continue
+            self.params[key] = p + (d if abs(d) < _SNAP[key] else a * d)
+            changed = True
+            geom |= key in _GEOMETRIC
+        if geom:
+            self._build_geometry()
+        if changed:
+            self._build_amplitudes()
+        return changed
+
+    def is_transitioning(self):
+        return any(self.params[k] != v for k, v in self.target.items())
+
+    # ── Génération de la surface ──
+    def generate_fields(self, t):
+        """
+        Champs de mer au temps t : (Z, Dx, Dy), chacun (Ny, Nx).
+        Z = élévation eulérienne (utilisée par la physique) ;
+        Dx, Dy = déplacements horizontaux « choppy » des sommets (affichage).
+        """
+        self._t = t
+        c_t = (self._field_coef
+               * (self._A * np.exp(1j * (self._phi - self._omega_c * t)))).astype(np.complex64)
+        F = ((self._Ey[None] * c_t[:, None, :]) @ self._Ex.T).real.astype(float)
+        return F[0], F[1], F[2]
+
+    def generate_surface(self, t):
+        """Élévation seule Z (Ny, Nx)."""
+        return self.generate_fields(t)[0]
+
+    def colors_and_normals(self, Z, Dx, Dy):
+        """Voir get_sea_colors_and_normals ; échelle de teinte liée au Hs courant."""
+        return get_sea_colors_and_normals(Z, Dx, Dy, self.Hs)
 
 
 def interpolate_sea_at(Z, xb, yb):
@@ -188,17 +284,6 @@ def interpolate_sea_at_batch(Z, xb, yb):
     return z
 
 
-def sea_gradient_at(Z, xb, yb):
-    """
-    Gradient local de la surface ∂η/∂x, ∂η/∂y à la position du bateau.
-    Utilisé pour calculer les angles de houle induits.
-    """
-    dZ_dy_grid, dZ_dx_grid = np.gradient(Z, dy, dx)
-    dzdx = interpolate_sea_at(dZ_dx_grid, xb, yb)
-    dzdy = interpolate_sea_at(dZ_dy_grid, xb, yb)
-    return dzdx, dzdy
-
-
 # ======================
 # 🔹 COULEURS DE LA MER
 # ======================
@@ -212,7 +297,12 @@ def _smoothstep(e0, e1, v):
     return u * u * (3.0 - 2.0 * u)
 
 
-def get_sea_colors_and_normals(Z, Dx, Dy):
+def color_range(Hs):
+    """Demi-plage d'élévation (m) couverte par l'échelle de teinte."""
+    return 0.6 * Hs
+
+
+def get_sea_colors_and_normals(Z, Dx, Dy, Hs):
     """
     Couleur RGB (Ny, Nx, 3) et normale unitaire (Ny·Nx, 3) de chaque sommet
     de la surface affichée P(x,y) = (x + Dx, y + Dy, Z). Les gradients sont
@@ -230,10 +320,10 @@ def get_sea_colors_and_normals(Z, Dx, Dy):
     dDx_dy, dDx_dx = np.gradient(Dx, dy, dx)
     dDy_dy, dDy_dx = np.gradient(Dy, dy, dx)
 
-    h = np.clip(0.5 + Z / (1.2 * Hs * wind_scale), 0.0, 1.0)
+    h = np.clip(0.5 + Z / (2.0 * color_range(Hs)), 0.0, 1.0)
     rgb = _SEA_CMAP(h)[..., :3]
     J = (1.0 + dDx_dx) * (1.0 + dDy_dy) - dDx_dy * dDy_dx
-    foam = _smoothstep(0.75, 0.35, J) * _smoothstep(0.0, 0.3 * Hs * wind_scale, Z)
+    foam = _smoothstep(0.75, 0.35, J) * _smoothstep(0.0, 0.3 * Hs, Z)
     rgb += (_FOAM_RGB - rgb) * (0.85 * foam[..., None])
 
     n = np.cross(np.stack([1.0 + dDx_dx, dDy_dx, Zx], axis=-1),
@@ -242,13 +332,20 @@ def get_sea_colors_and_normals(Z, Dx, Dy):
     return rgb, n
 
 
-def get_sea_colors(Z, Dx, Dy):
-    """Couleur RGB (Ny, Nx, 3) seule — voir get_sea_colors_and_normals."""
-    return get_sea_colors_and_normals(Z, Dx, Dy)[0]
-
-
 if __name__ == '__main__':
-    Z = generate_sea_surface(0.0)
-    Hs_sim = 4.0 * np.std(Z)
-    print(f"Surface générée : {Z.shape}, min={Z.min():.2f}, max={Z.max():.2f}")
-    print(f"Hs simulé ≈ {Hs_sim:.2f} m  (cible : {Hs * wind_scale} m)")
+    sea = SeaState()
+    for Hs, Tp in [(1.0, 6.0), (6.0, 8.0), (16.0, 14.0), (3.0, 4.0)]:
+        sea.set_params(Hs=Hs, Tp=Tp)
+        Z = sea.generate_surface(0.0)
+        print(f"Hs={Hs:5.1f} m  Tp={Tp:4.1f} s  →  Hs simulé ≈ {4.0 * np.std(Z):5.2f} m"
+              f"  (min={Z.min():+.2f}, max={Z.max():+.2f})")
+
+    # Continuité : un changement de direction ne fait pas sauter la surface
+    # au point de référence (seule la forme spatiale tourne autour de lui)
+    sea.set_params(Hs=6.0, Tp=8.0, theta_mean=0.0)
+    ref = (300.0, 300.0)
+    z0 = interpolate_sea_at(sea.generate_surface(37.0), *ref)
+    sea.advance(0.0, ref=ref)
+    sea.set_params(theta_mean=np.radians(60))
+    z1 = interpolate_sea_at(sea.generate_surface(37.0), *ref)
+    print(f"Continuité au point de référence : {z0:+.3f} m → {z1:+.3f} m")
