@@ -11,8 +11,7 @@ L'état de mer, la navigation et le navire lui-même se modifient en direct, pen
 1. [Logique physique](#1-logique-physique)
 2. [Réalisation de la simulation](#2-réalisation-de-la-simulation)
 3. [Utilisation](#3-utilisation)
-4. [Sécurité](#4-sécurité)
-5. [Références](#5-références)
+4. [Références](#4-références)
 
 ---
 
@@ -325,24 +324,7 @@ il apparaît automatiquement dans le menu.
 
 ---
 
-## 4. Sécurité
-
-Application de bureau locale : pas d'accès réseau, pas de lecture ni d'écriture de fichiers, pas
-d'exécution de code dynamique, aucune donnée personnelle ni secret. Les entrées passent par des
-widgets bornés et par `BoatParams.validate()`. Points d'attention :
-
-- Installer les dépendances depuis PyPI dans un environnement virtuel dédié, et vérifier
-  régulièrement les vulnérabilités connues (`pip install pip-audit` puis `pip-audit`).
-- Les noms de navires et messages sont affichés en HTML dans l'interface : si l'on ajoute un jour le
-  chargement de navires depuis un fichier, échapper ces textes (`html.escape`).
-
-> **Avertissement.** Ce jumeau numérique est un outil pédagogique et de démonstration. Ses coefficients
-> hydrodynamiques sont simplifiés : il n'est pas validé pour des décisions réelles de navigation,
-> de conception ou de chargement.
-
----
-
-## 5. Références
+## 4. Références
 
 - Hasselmann K. et al. (1973). *Measurements of wind-wave growth and swell decay during the Joint North
   Sea Wave Project (JONSWAP)*.
