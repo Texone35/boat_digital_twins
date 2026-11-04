@@ -4,6 +4,8 @@ Simulation temps réel d'un navire à 6 degrés de liberté (équation de Cummin
 irrégulière directionnelle (spectre JONSWAP), avec rendu 3D interactif (PyVista / Qt).
 L'état de mer, la navigation et le navire lui-même se modifient en direct, pendant la simulation.
 
+![Vue générale : cargo dans une mer d'ouragan, texte d'infos, mât gradué et panneau de contrôle](docs/images/vue_generale.jpg)
+
 ---
 
 ## Sommaire
@@ -310,6 +312,10 @@ il apparaît automatiquement dans le menu.
   (lisible dans le texte d'infos) et le tangage change.
 - **Taille du navire** : même mer « Tempête », Yacht puis Porte-conteneurs : le petit navire épouse
   chaque vague, le grand filtre les vagues plus courtes que lui.
+
+| Résonance en roulis : Cargo, houle de travers, $T_e = 13$ s | Chalutier en tempête, houle de face |
+|:---:|:---:|
+| ![Cargo en houle de travers, roulis amplifié](docs/images/resonance_roulis.jpg) | ![Chalutier soulevé par une crête en mer de tempête](docs/images/chalutier_tempete.jpg) |
 
 ### 3.7 Réglages avancés (dans le code)
 
