@@ -2,13 +2,13 @@
 Évaluation d'un prédicteur de houle contre la vérité (seule étape qui y accède).
 
 Un prédicteur est une fonction  forecaster(t_win, x_probes, eta_win) -> f,
-avec f(x, t) -> η̂ [Nt, Nx]. La baseline LSQ et le PINN ont la même interface.
+avec f(x, t) -> η̂ [Nt, Nx]. (baseline_lsq.forecaster).
 """
 
 import numpy as np
 from scipy.ndimage import uniform_filter1d
 
-from wavepinn import physics
+from waveforecast import physics
 
 USEFUL_THRESHOLD = 0.20   # horizon utile : RMS/Hs dépasse 20 % (cf. document)
 

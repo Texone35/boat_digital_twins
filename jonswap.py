@@ -89,13 +89,13 @@ def dispersion_relation(omega, h=np.inf):
 
 
 # ======================
-# 🔹 COMPOSANTES SPECTRALES (partagées avec wavepinn)
+# 🔹 COMPOSANTES SPECTRALES (partagées avec waveforecast)
 # ======================
 def spectral_components(Hs, Tp, gamma, theta_mean, spread, jitter, n_dir=N_dir,
                         w_band=(0.5, 4.0), k_max=K_MAX):
     """
     Composantes de la mer JONSWAP directionnelle : une seule source pour la
-    mer affichée (SeaState) et le générateur de vérité (wavepinn).
+    mer affichée (SeaState) et le générateur de vérité (waveforecast).
 
     len(jitter) fixe le nombre de fréquences ; chaque fréquence est décalée
     de jitter·dω dans sa bande (casse la périodicité). n_dir = 1 : houle
@@ -161,6 +161,7 @@ class SeaState:
         self._t = 0.0
         self._ref = (Lx / 2, Ly / 2)
         self._omega_c = None
+        self._saved = None          # état sauvegardé pendant une mer figée (freeze)
         self._build_geometry()
         self._build_amplitudes()
 
@@ -174,7 +175,7 @@ class SeaState:
     def _build_geometry(self):
         """Fréquences, directions, vecteurs d'onde et facteurs e^{i·k·x}."""
         w, dw, k, theta, _ = spectral_components(*_sea_args(self.params), self._jitter)
-        kx =(k[:, None] * np.cos(theta)[None, :]).ravel()   # composantes aplaties
+        kx = (k[:, None] * np.cos(theta)[None, :]).ravel()   # composantes aplaties
         ky = (k[:, None] * np.sin(theta)[None, :]).ravel()   # C = N_freq·N_dir
         omega_c = np.repeat(w, N_dir)
 
@@ -191,18 +192,24 @@ class SeaState:
         self.theta, self.dtheta = theta, theta[1] - theta[0]
         self._omega_c, self._kx, self._ky = omega_c, kx, ky
         self._k_c = np.hypot(kx, ky)
-        # Facteurs séparables, indépendants du temps. complex64 : produits
-        # matriciels ≈2× plus rapides, erreur ~1e-6 m.
-        self._Ey = np.exp(1j * np.outer(y, ky)).astype(np.complex64)   # (Ny, C)
-        self._Ex = np.exp(1j * np.outer(x, kx)).astype(np.complex64)   # (Nx, C)
+        self._build_factors()
+
+    def _build_factors(self):
+        """Facteurs séparables e^{i·kx·x}, e^{i·ky·y}, indépendants du temps.
+        complex64 : produits matriciels ≈2× plus rapides, erreur ~1e-6 m."""
+        self._Ey = np.exp(1j * np.outer(y, self._ky)).astype(np.complex64)   # (Ny, C)
+        self._Ex = np.exp(1j * np.outer(x, self._kx)).astype(np.complex64)   # (Nx, C)
 
     def _build_amplitudes(self):
         """Amplitudes A(ω,θ) (spectral_components) et coefficients choppy."""
         p = self.params
         self._A = spectral_components(*_sea_args(p), self._jitter)[4].ravel()
+        self._build_choppy()
+
+    def _build_choppy(self):
         # Coefficients spectraux des 3 champs (η, Dx, Dy) : Dx = −λ ΣA·(kx/k)·sin
         # ⇔ Re[Σ (iλ·kx/k)·c·e^{i(...)}], idem Dy.
-        lam = p['choppiness']
+        lam = self.params['choppiness']
         self._field_coef = np.stack([np.ones_like(self._k_c),
                                      1j * lam * self._kx / self._k_c,
                                      1j * lam * self._ky / self._k_c])   # (3, C)
@@ -220,12 +227,49 @@ class SeaState:
         self.set_target(**params)
         self.advance(np.inf)
 
+    # ── Mer figée imposée de l'extérieur (mode Prévision) ──
+    _FROZEN = ('_phi', '_omega_c', '_kx', '_ky', '_k_c', '_A', '_Ey', '_Ex', '_field_coef')
+
+    def freeze(self, A, omega, k, phi, **params):
+        """
+        Remplace la mer par une houle unidirectionnelle vers +x donnée par ses
+        composantes, η = Σ A cos(kx − ωt + φ), et la fige : advance() n'a plus
+        d'effet. params (Hs, Tp, gamma) : valeurs affichées et lues par le
+        modèle de navire. unfreeze() rend la mer d'avant, intacte.
+        """
+        if self._saved is None:
+            self._saved = ({a: getattr(self, a) for a in self._FROZEN},
+                           dict(self.params), dict(self.target))
+        self.params.update(params, theta_mean=0.0)
+        self.target.update(self.params)
+        self._omega_c, self._kx = np.asarray(omega, float), np.asarray(k, float)
+        self._ky, self._k_c = np.zeros_like(self._kx), self._kx.copy()
+        self._A, self._phi = np.asarray(A, float), np.asarray(phi, float)
+        self._build_factors()
+        self._build_choppy()
+
+    def unfreeze(self):
+        if self._saved is None:
+            return
+        attrs, params, target = self._saved
+        for a, v in attrs.items():
+            setattr(self, a, v)
+        self.params.update(params)      # en place : le panneau garde la même référence
+        self.target.update(target)
+        self._saved = None
+
+    @property
+    def frozen(self):
+        return self._saved is not None
+
     def advance(self, dt, ref=None):
         """
         Rapproche les paramètres courants de la cible sur une durée dt (s).
         ref = (x, y) : point où la surface reste continue (le bateau).
-        Retourne True si la mer a changé.
+        Retourne True si la mer a changé. Sans effet sur une mer figée.
         """
+        if self.frozen:
+            return False
         if ref is not None:
             self._ref = ref
         a = 1.0 - np.exp(-dt / TAU)
@@ -261,6 +305,14 @@ class SeaState:
                * (self._A * np.exp(1j * (self._phi - self._omega_c * t)))).astype(np.complex64)
         F = ((self._Ey[None] * c_t[:, None, :]) @ self._Ex.T).real.astype(float)
         return F[0], F[1], F[2]
+
+    def eta_points(self, x, y, t):
+        """
+        Élévation exacte (sans grille) aux points fixes (x, y) [P] pour les
+        instants t [Nt] : tableau [Nt, P]. Un seul produit matriciel.
+        """
+        E = np.exp(1j * (np.outer(x, self._kx) + np.outer(y, self._ky) + self._phi))   # (P, C)
+        return ((np.exp(-1j * np.outer(np.atleast_1d(t), self._omega_c)) * self._A) @ E.T).real
 
     def generate_surface(self, t):
         """Élévation seule Z (Ny, Nx)."""

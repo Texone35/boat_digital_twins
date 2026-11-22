@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from scipy.signal import hilbert
 
-from wavepinn import data, physics, sensors
+from waveforecast import data, physics, sensors
 
 
 @pytest.fixture(scope='module')

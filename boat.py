@@ -48,6 +48,11 @@ class BoatParams:
     xf_ratio: float = 0.02         # centre de flottaison en avant du milieu / L
     speed: float = 2.5    # vitesse de consigne (m/s)
     color: str = '#FFD700'
+    # Amortissement de roulis : linéaire (fraction ζ du critique) et
+    # quadratique b_q (1/rad), moment −b_q·(Ixx + A44)·|p|·p (quilles de
+    # roulis, viscosité). Paramètres que l'identification (shipid) retrouve.
+    zeta_roll: float = 0.10
+    roll_quad: float = 0.0
 
     # ── Grandeurs dérivées ──
     @property
@@ -84,6 +89,8 @@ class BoatParams:
             err.append('GM_T et GM_L doivent être > 0 (navire instable sinon).')
         if not (0.2 <= self.kxx <= 0.5) or not (0.15 <= self.kyy <= 0.35):
             err.append('Rayons de giration hors plage (kxx 0.2-0.5, kyy 0.15-0.35).')
+        if not (0 < self.zeta_roll <= 0.5) or self.roll_quad < 0:
+            err.append('Amortissement de roulis : 0 < ζ ≤ 0.5 et b_q ≥ 0.')
         if self.freeboard_ratio <= 0:
             err.append('Le franc-bord doit être > 0.')
         try:
@@ -183,7 +190,9 @@ class HydroModel:
         # ── Amortissement radiatif ──
         self.omega_n = self._omega_n()
         MAn = self.M_diag + self.A_diag(self.omega_n)
-        self.B0 = _ZETA_TARGET * 2.0 * np.sqrt(self._C_eff * MAn)
+        zeta = _ZETA_TARGET.copy()
+        zeta[3] = p.zeta_roll
+        self.B0 = zeta * 2.0 * np.sqrt(self._C_eff * MAn)
 
         # Points d'échantillonnage de la flottaison L×B (repère navire). Grille
         # régulière centrée : les colonnes x, y sont orthogonales, donc le plan
@@ -239,13 +248,21 @@ class HydroModel:
         longitudinale / transversale dans le repère navire. Moyenner sur toute
         la flottaison filtre naturellement les vagues courtes devant L.
         """
+        xs, ys = self.waterplane_points(x, y, psi)
+        return self.wave_plane(_sea.interpolate_sea_at_batch(Z, xs % _sea.Lx, ys % _sea.Ly))
+
+    def waterplane_points(self, x, y, psi):
+        """Points d'échantillonnage de la flottaison (11 × 5), repère terrestre."""
         c, s = np.cos(psi), np.sin(psi)
-        xs = x + c*self._wp_x - s*self._wp_y
-        ys = y + s*self._wp_x + c*self._wp_y
-        zeta = _sea.interpolate_sea_at_batch(Z, xs % _sea.Lx, ys % _sea.Ly)
-        return (zeta.mean(),
-                np.dot(self._wp_x, zeta) / np.dot(self._wp_x, self._wp_x),
-                np.dot(self._wp_y, zeta) / np.dot(self._wp_y, self._wp_y))
+        return (x + c*self._wp_x - s*self._wp_y, y + s*self._wp_x + c*self._wp_y)
+
+    def wave_plane(self, zeta):
+        """
+        Plan des moindres carrés (ζ̄, s_x, s_y) sur les élévations zeta aux
+        points de waterplane_points ; zeta [..., 55] → trois tableaux [...].
+        """
+        wx, wy = self._wp_x, self._wp_y
+        return zeta.mean(axis=-1), zeta @ wx / (wx @ wx), zeta @ wy / (wy @ wy)
 
     # ── Forces d'excitation de houle — Froude-Krylov hydrostatique ──
     def excitation_forces(self, wave):
@@ -302,6 +319,8 @@ class HydroModel:
         # Propulsion : poussée qui équilibre la résistance B11·u à la vitesse
         # de consigne → u converge vers U_target en régime établi
         rhs[0] += Bd[0] * self.U_target
+        # Amortissement quadratique de roulis (nul par défaut)
+        rhs[3] -= self.params.roll_quad * MA[3, 3] * abs(nu[3]) * nu[3]
 
         nu_dot = np.linalg.solve(MA, rhs)
 

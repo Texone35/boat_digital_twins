@@ -1,0 +1,122 @@
+{
+  "bruit 0.0°": {
+    "vrai": {
+      "GM_T": 0.8,
+      "zeta": 0.0518,
+      "b_q": 1.0
+    },
+    "nominal": {
+      "GM_T": 1.2,
+      "zeta": 0.0938,
+      "b_q": 0.0
+    },
+    "erreur d'équation": {
+      "GM_T": 0.794,
+      "zeta": 0.0583,
+      "b_q": 0.84,
+      "secondes": 0.0
+    },
+    "erreur de sortie": {
+      "GM_T": 0.801,
+      "zeta": 0.0519,
+      "b_q": 1.02,
+      "secondes": 0.42
+    },
+    "PINN": {
+      "GM_T": 0.801,
+      "zeta": 0.0682,
+      "b_q": 0.54,
+      "secondes": 109.01
+    }
+  },
+  "bruit 0.2°": {
+    "vrai": {
+      "GM_T": 0.8,
+      "zeta": 0.0518,
+      "b_q": 1.0
+    },
+    "nominal": {
+      "GM_T": 1.2,
+      "zeta": 0.0938,
+      "b_q": 0.0
+    },
+    "erreur d'équation": {
+      "GM_T": 0.815,
+      "zeta": 0.0596,
+      "b_q": 0.8,
+      "secondes": 0.0
+    },
+    "erreur de sortie": {
+      "GM_T": 0.802,
+      "zeta": 0.0505,
+      "b_q": 1.06,
+      "secondes": 0.53
+    },
+    "PINN": {
+      "GM_T": 0.802,
+      "zeta": 0.0646,
+      "b_q": 0.67,
+      "secondes": 102.27
+    }
+  },
+  "bruit 0.5°": {
+    "vrai": {
+      "GM_T": 0.8,
+      "zeta": 0.0518,
+      "b_q": 1.0
+    },
+    "nominal": {
+      "GM_T": 1.2,
+      "zeta": 0.0938,
+      "b_q": 0.0
+    },
+    "erreur d'équation": {
+      "GM_T": 0.917,
+      "zeta": 0.0913,
+      "b_q": -0.44,
+      "secondes": 0.0
+    },
+    "erreur de sortie": {
+      "GM_T": 0.802,
+      "zeta": 0.0484,
+      "b_q": 1.13,
+      "secondes": 0.71
+    },
+    "PINN": {
+      "GM_T": 0.803,
+      "zeta": 0.0599,
+      "b_q": 0.83,
+      "secondes": 102.16
+    }
+  },
+  "bruit 1.0°": {
+    "vrai": {
+      "GM_T": 0.8,
+      "zeta": 0.0518,
+      "b_q": 1.0
+    },
+    "nominal": {
+      "GM_T": 1.2,
+      "zeta": 0.0938,
+      "b_q": 0.0
+    },
+    "erreur d'équation": {
+      "GM_T": 1.277,
+      "zeta": 0.0722,
+      "b_q": -0.44,
+      "secondes": 0.0
+    },
+    "erreur de sortie": {
+      "GM_T": 0.803,
+      "zeta": 0.045,
+      "b_q": 1.24,
+      "secondes": 1.15
+    },
+    "PINN": {
+      "GM_T": 0.804,
+      "zeta": 0.0536,
+      "b_q": 1.06,
+      "secondes": 103.09
+    }
+  }
+}

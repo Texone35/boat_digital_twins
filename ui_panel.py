@@ -43,6 +43,8 @@ BOAT_FIELDS = [
     ('kxx',             'Giration roulis /B',    0.10,  0.6, 0.01, 2, ''),
     ('kyy',             'Giration tangage /L',   0.10,  0.5, 0.01, 2, ''),
     ('freeboard_ratio', 'Franc-bord / T',        0.0,   3.0, 0.05, 2, ''),
+    ('zeta_roll',       'Amort. roulis ζ',       0.005, 0.5, 0.005, 3, ''),
+    ('roll_quad',       'Amort. roulis quadr.',  0.0,   5.0, 0.05, 2, ' /rad'),
 ]
 
 
@@ -111,6 +113,10 @@ class ControlPanel(QWidget):
     recenterRequested = Signal()
     followToggled = Signal(bool)
     boatApplied = Signal(object)       # BoatParams
+    forecastToggled = Signal(bool)     # mode Prévision
+    ghostLeadChanged = Signal(float)   # avance de la coque fantôme (s)
+    hiddenToggled = Signal(bool)       # navire réel aux caractéristiques cachées
+    calibrateRequested = Signal()      # appliquer l'estimation au modèle
 
     def __init__(self, sea_params, boat_params, preview_fn, parent=None):
         """
@@ -127,7 +133,9 @@ class ControlPanel(QWidget):
         lay = QVBoxLayout(content)
         lay.addWidget(self._build_sea_group(sea_params))
         lay.addWidget(self._build_nav_group(boat_params))
+        lay.addWidget(self._build_forecast_group())
         lay.addWidget(self._build_boat_group(boat_params))
+        lay.addWidget(self._build_calibration_group())
         lay.addStretch(1)
 
         scroll = QScrollArea()
@@ -141,7 +149,7 @@ class ControlPanel(QWidget):
 
     # ── Mer ──
     def _build_sea_group(self, sea_params):
-        box = QGroupBox('Mer (effet immédiat, transition douce)')
+        box = self.sea_box = QGroupBox('Mer (effet immédiat, transition douce)')
         form = QFormLayout(box)
         self.sea_preset = QComboBox()
         self.sea_preset.addItems([CUSTOM, *SEA_PRESETS])
@@ -215,6 +223,74 @@ class ControlPanel(QWidget):
             btns.addWidget(b)
         form.addRow(btns)
         return box
+
+    # ── Prévision ──
+    def _build_forecast_group(self):
+        box = QGroupBox('Prévision de houle')
+        form = QFormLayout(box)
+        self.forecast_chk = QCheckBox('Mode prévision')
+        self.forecast_chk.setToolTip(
+            'Houle unidirectionnelle figée (Hs, Tp, γ courants), 4 sondes 300-450 m en '
+            'amont, navire en station. Prévision LSQ toutes les 5 s sur 60 s.')
+        self.forecast_chk.toggled.connect(self.forecastToggled)
+        form.addRow(self.forecast_chk)
+        self.ghost_row = SliderRow(0.0, 60.0, 1.0, 0, ' s', 20.0)
+        self.ghost_row.valueChanged.connect(self.ghostLeadChanged)
+        form.addRow('Coque fantôme à t +', self.ghost_row)
+        hint = QLabel('Régler la mer avant d\'activer (mer modérée : le modèle est linéaire) ; '
+                      'elle est ensuite figée. Cap oblique (ex. 60°) pour voir du roulis.')
+        hint.setWordWrap(True)
+        hint.setStyleSheet('color: gray; font-size: 11px;')
+        form.addRow(hint)
+        return box
+
+    # ── Calibration ──
+    def _build_calibration_group(self):
+        box = QGroupBox('Calibration sur le roulis mesuré')
+        form = QFormLayout(box)
+        self.hidden_chk = QCheckBox('Navire réel aux caractéristiques cachées')
+        self.hidden_chk.setToolTip(
+            'Le navire simulé (« réel ») reçoit un GM_T plus faible et des amortissements de '
+            'roulis tirés au hasard ; le panneau garde le modèle, que la calibration recale.')
+        self.hidden_chk.toggled.connect(self.hiddenToggled)
+        form.addRow(self.hidden_chk)
+        self.calib_status = QLabel('Enregistrement du roulis…')
+        self.calib_status.setWordWrap(True)
+        self.calib_status.setTextFormat(Qt.RichText)
+        form.addRow(self.calib_status)
+        self.calib_btn = QPushButton('Calibrer le modèle')
+        self.calib_btn.setEnabled(False)
+        self.calib_btn.clicked.connect(self.calibrateRequested)
+        form.addRow(self.calib_btn)
+        hint = QLabel('Identification (erreur de sortie) toutes les 20 s sur les 300 dernières '
+                      'secondes de roulis, navire à poste fixe (vitesse nulle) ; houle de travers '
+                      'conseillée.')
+        hint.setWordWrap(True)
+        hint.setStyleSheet('color: gray; font-size: 11px;')
+        form.addRow(hint)
+        return box
+
+    def show_calibration(self, html, can_apply):
+        self.calib_status.setText(html)
+        self.calib_btn.setEnabled(can_apply)
+
+    def set_model_params(self, params):
+        """Le formulaire et le modèle appliqué deviennent `params` (sans signal).
+        Retourne les paramètres tels qu'arrondis par le formulaire."""
+        self._fill_boat(params)
+        self._applied = self.form_params()
+        self._update_preview()
+        return self._applied
+
+    def set_sea_locked(self, locked):
+        self.sea_box.setEnabled(not locked)
+
+    def set_sea_values(self, sea_params):
+        """Curseurs de mer alignés sur la mer (sans émettre de signal)."""
+        for key, row in self.sea_rows.items():
+            v = sea_params[key]
+            row.setValue((v * 180.0 / 3.141592653589793) % 360.0 if key == 'theta_mean' else v)
+        self._match_sea_preset()
 
     def _on_pause(self, paused):
         self.pause_btn.setText('Reprendre' if paused else 'Pause')

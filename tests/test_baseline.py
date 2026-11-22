@@ -1,6 +1,6 @@
 import numpy as np
 
-from wavepinn import baseline_lsq, evaluate, physics, sensors
+from waveforecast import baseline_lsq, evaluate, physics, sensors
 
 
 def test_lsq_accurate_inside_zone_and_fails_beyond():

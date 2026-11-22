@@ -1,7 +1,7 @@
 """
-Stockage .npz. Règles (cf. Projet PINN 1) :
+Stockage .npz. Règles :
   - data/raw/     : composantes de la mer (la vérité se régénère par physics.eta)
-  - data/sensors/ : mesures seules → ce que voient la baseline et le PINN
+  - data/sensors/ : mesures seules → ce que voit la prévision
   - la graine est dans le nom ; les splits train/val/test se font par mer.
 """
 

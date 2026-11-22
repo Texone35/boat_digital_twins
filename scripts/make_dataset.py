@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from wavepinn import data, physics, sensors  # noqa: E402
+from waveforecast import data, physics, sensors  # noqa: E402
 
 HS = (1.0, 2.0, 4.0)
 TP = (7.0, 10.0, 13.0)

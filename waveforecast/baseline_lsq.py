@@ -12,7 +12,7 @@ résolu par lstsq sur le système augmenté.
 
 import numpy as np
 
-from wavepinn.physics import energy_band, eta, g
+from waveforecast.physics import energy_band, eta, g
 
 # Bande de reconstruction : 99 % de l'énergie. Avec 90 % (la bande de la zone
 # de prédictibilité), les 10 % ignorés laissent un plancher d'erreur ≈ 8-10 % Hs.

@@ -96,12 +96,14 @@ class _IsoLines:
         self.mesh.shallow_copy(lines)
 
 
-def _boat_polydata(tri_verts, tri_colors):
-    """Coque en triangles à sommets non partagés : couleur franche par face."""
+def _boat_polydata(tri_verts, tri_colors=None):
+    """Coque en triangles à sommets non partagés : couleur franche par face
+    (sans couleurs : coque unie, ex. la coque fantôme)."""
     n = tri_verts.shape[0]
     faces = np.column_stack([np.full(n, 3), np.arange(3 * n).reshape(n, 3)])
     mesh = pv.PolyData(tri_verts.reshape(-1, 3), faces=faces.ravel())
-    mesh.cell_data['rgb'] = _rgb_u8(mcolors.to_rgba_array(tri_colors))
+    if tri_colors is not None:
+        mesh.cell_data['rgb'] = _rgb_u8(mcolors.to_rgba_array(tri_colors))
     return mesh
 
 
@@ -160,6 +162,17 @@ class Scene:
         self.boat_mesh = _boat_polydata(tris0, cols0)
         plotter.add_mesh(self.boat_mesh, scalars='rgb', rgb=True, preference='cell',
                          show_edges=True, edge_color='#333333', line_width=0.5)
+
+        # Mode Prévision : coque fantôme (état prévu à t + Δ) et bouées des
+        # sondes ; masquées hors de ce mode
+        self.ghost_mesh = _boat_polydata(tris0)
+        self.ghost_actor = plotter.add_mesh(self.ghost_mesh, color='white', opacity=0.35,
+                                            reset_camera=False)
+        self.probe_mesh = pv.PolyData(np.zeros((1, 3)))
+        self.probe_actor = plotter.add_mesh(self.probe_mesh, color='#ff7f0e', point_size=18,
+                                            render_points_as_spheres=True, reset_camera=False)
+        self.ghost_state = self.probe_x = None
+        self.set_probes(None)
 
         # Ligne de flottaison et texte d'infos : créés une seule fois puis mis
         # à jour en place. Un add_mesh/add_text par frame déclencherait à
@@ -256,6 +269,22 @@ class Scene:
                 reset_camera=False, render=False),
         ]
 
+    # ── Mode Prévision ──
+    def set_probes(self, probe_x):
+        """Bouées des sondes aux abscisses probe_x (None : masquées, fantôme aussi)."""
+        self.probe_x = None if probe_x is None else np.asarray(probe_x, float)
+        if self.probe_x is not None:
+            n = len(self.probe_x)
+            self.probe_mesh.shallow_copy(pv.PolyData(np.column_stack(
+                [self.probe_x, np.full(n, sea_mod.Ly / 2), np.zeros(n)])))
+        self.probe_actor.SetVisibility(self.probe_x is not None)
+        self.set_ghost(None)
+
+    def set_ghost(self, state):
+        """État [12] de la coque fantôme (None : masquée)."""
+        self.ghost_state = state
+        self.ghost_actor.SetVisibility(state is not None)
+
     # ── Mise à jour par frame ──
     def update(self, Z, Dx, Dy, wave, frame, n_sub=1, fps=0.0, paused=False):
         sim, sea, boat = self.sim, self.sim.sea, self.sim.boat
@@ -268,6 +297,18 @@ class Scene:
         def sea_elev_fn(x_arr, y_arr):
             return sea_mod.interpolate_sea_at_batch(
                 Z, x_arr % sea_mod.Lx, y_arr % sea_mod.Ly)
+
+        # Fantôme avant la vraie coque : compute_mesh met à jour
+        # boat.world_vertices, utilisé plus bas pour la ligne de flottaison
+        if self.ghost_state is not None:
+            g = self.ghost_state
+            ghost_tris, _ = boat.compute_mesh(pitch=g[4], roll=g[3], x_pos=g[0] % sea_mod.Lx,
+                                              y_pos=g[1] % sea_mod.Ly, z_center=g[2], yaw=g[5])
+            self.ghost_mesh.points = ghost_tris.reshape(-1, 3)
+        if self.probe_x is not None:
+            pts = self.probe_mesh.points
+            pts[:, 2] = sea_mod.interpolate_sea_at_batch(Z, self.probe_x, pts[:, 1])
+            self.probe_mesh.Modified()
 
         # Coque en position absolue (heave, roll, pitch issus de Cummins)
         boat_tris, boat_colors = boat.compute_mesh(

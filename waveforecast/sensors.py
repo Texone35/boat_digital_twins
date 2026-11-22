@@ -5,7 +5,7 @@ La houle va vers +x ; le navire est en x = 0, les sondes en x < 0.
 
 import numpy as np
 
-from wavepinn.physics import eta
+from waveforecast.physics import eta
 
 # Zone des sondes en amont (m) : 300-600 m couvre un horizon de 30-60 s
 # pour Tp ≈ 7-13 s (cf. physics.predictable_window).
