@@ -89,6 +89,44 @@ def dispersion_relation(omega, h=np.inf):
 
 
 # ======================
+# 🔹 COMPOSANTES SPECTRALES (partagées avec wavepinn)
+# ======================
+def spectral_components(Hs, Tp, gamma, theta_mean, spread, jitter, n_dir=N_dir,
+                        w_band=(0.5, 4.0), k_max=K_MAX):
+    """
+    Composantes de la mer JONSWAP directionnelle : une seule source pour la
+    mer affichée (SeaState) et le générateur de vérité (wavepinn).
+
+    len(jitter) fixe le nombre de fréquences ; chaque fréquence est décalée
+    de jitter·dω dans sa bande (casse la périodicité). n_dir = 1 : houle
+    unidirectionnelle vers theta_mean. Amplitudes A = √(2 S(ω) D(θ)dθ dω),
+    renormalisées pour que Hs = 4·√(ΣA²/2) exactement.
+
+    Retourne (ω (Nf,), dω, k (Nf,), θ (Nd,), A (Nf, Nd)).
+    """
+    wp = 2 * np.pi / Tp
+    w = np.linspace(w_band[0] * wp, w_band[1] * wp, len(jitter))
+    dw = w[1] - w[0]
+    w = w + np.asarray(jitter) * dw
+    offsets = np.linspace(-np.pi / 2, np.pi / 2, n_dir) if n_dir > 1 else np.zeros(1)
+    theta = theta_mean + offsets
+    k = dispersion_relation(w)
+    S = jonswap_spectrum(w, Hs, Tp, gamma)
+    # D(θ)dθ ∝ cos^{2s}, somme 1 (cos ≥ 0 sur ±π/2 ; clip : arrondis aux bords)
+    c = np.clip(np.cos(offsets), 0.0, None) ** (2 * spread)
+    A = np.sqrt(2.0 * S[:, None] * (c / c.sum())[None, :] * dw)
+    A[k > k_max, :] = 0.0
+    # Normalisation exacte : la formule de α ignore le gain d'énergie du pic
+    # JONSWAP (≈ ×1.5 pour γ = 3.3).
+    A *= Hs / (4.0 * np.sqrt(np.sum(A**2) / 2.0))
+    return w, dw, k, theta, A
+
+
+def _sea_args(p):
+    return p['Hs'], p['Tp'], p['gamma'], p['theta_mean'], p['spread']
+
+
+# ======================
 # 🔹 ÉTAT DE MER RECONFIGURABLE EN DIRECT
 # ======================
 class SeaState:
@@ -135,14 +173,8 @@ class SeaState:
 
     def _build_geometry(self):
         """Fréquences, directions, vecteurs d'onde et facteurs e^{i·k·x}."""
-        p = self.params
-        wp = 2 * np.pi / p['Tp']
-        w = np.linspace(0.5 * wp, 4.0 * wp, N_freq)   # ½·ωp → 4·ωp (énergie utile)
-        dw = w[1] - w[0]
-        w = w + self._jitter * dw
-        theta = p['theta_mean'] + np.linspace(-np.pi / 2, np.pi / 2, N_dir)
-        k = dispersion_relation(w)
-        kx = (k[:, None] * np.cos(theta)[None, :]).ravel()   # composantes aplaties
+        w, dw, k, theta, _ = spectral_components(*_sea_args(self.params), self._jitter)
+        kx =(k[:, None] * np.cos(theta)[None, :]).ravel()   # composantes aplaties
         ky = (k[:, None] * np.sin(theta)[None, :]).ravel()   # C = N_freq·N_dir
         omega_c = np.repeat(w, N_dir)
 
@@ -165,18 +197,9 @@ class SeaState:
         self._Ex = np.exp(1j * np.outer(x, kx)).astype(np.complex64)   # (Nx, C)
 
     def _build_amplitudes(self):
-        """Amplitudes A(ω,θ) = √(2 S(ω)·D(θ) dω dθ) et coefficients choppy."""
+        """Amplitudes A(ω,θ) (spectral_components) et coefficients choppy."""
         p = self.params
-        S = jonswap_spectrum(self.omega, p['Hs'], p['Tp'], p['gamma'])
-        # cos ≥ 0 sur ±π/2 autour de θ_mean (clip : arrondis négatifs aux bords)
-        c = np.clip(np.cos(self.theta - p['theta_mean']), 0.0, None) ** (2 * p['spread'])
-        D = c / (c.sum() * self.dtheta)                       # ∫D dθ = 1
-        A = np.sqrt(2.0 * S[:, None] * D[None, :] * self.domega * self.dtheta)
-        A[self.k > K_MAX, :] = 0.0
-        # Normalisation exacte : Hs = 4·σ_η = 4·√(ΣA²/2). La formule de α
-        # ignore le gain d'énergie du pic JONSWAP (≈ ×1.5 pour γ = 3.3).
-        A *= p['Hs'] / (4.0 * np.sqrt(np.sum(A**2) / 2.0))
-        self._A = A.ravel()
+        self._A = spectral_components(*_sea_args(p), self._jitter)[4].ravel()
         # Coefficients spectraux des 3 champs (η, Dx, Dy) : Dx = −λ ΣA·(kx/k)·sin
         # ⇔ Re[Σ (iλ·kx/k)·c·e^{i(...)}], idem Dy.
         lam = p['choppiness']

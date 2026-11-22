@@ -1,0 +1,26 @@
+{
+  "Tp=7": {
+    "n_seas": 6,
+    "n_forecasts": 126,
+    "useful_horizon_s": 90.0,
+    "theoretical_horizon_s": 89.9,
+    "rms_in_zone": 0.0706,
+    "rms_beyond_zone": 0.2646
+  },
+  "Tp=10": {
+    "n_seas": 6,
+    "n_forecasts": 126,
+    "useful_horizon_s": 66.5,
+    "theoretical_horizon_s": 62.9,
+    "rms_in_zone": 0.0627,
+    "rms_beyond_zone": 0.2929
+  },
+  "Tp=13": {
+    "n_seas": 6,
+    "n_forecasts": 126,
+    "useful_horizon_s": 51.0,
+    "theoretical_horizon_s": 48.4,
+    "rms_in_zone": 0.0628,
+    "rms_beyond_zone": 0.307
+  }
+}

@@ -12,6 +12,7 @@ L'état de mer, la navigation et le navire lui-même se modifient en direct, pen
 2. [Réalisation de la simulation](#2-réalisation-de-la-simulation)
 3. [Utilisation](#3-utilisation)
 4. [Références](#4-références)
+5. [Ouverture : données terrain et PINN](#5-ouverture--données-terrain-et-pinn)
 
 ---
 
@@ -333,3 +334,64 @@ il apparaît automatiquement dans le menu.
 - Salvesen N., Tuck E. O., Faltinsen O. (1970). *Ship motions and sea loads*.
 - Tessendorf J. (2001). *Simulating Ocean Water*.
 - Fossen T. I. (2011). *Handbook of Marine Craft Hydrodynamics and Motion Control*.
+- Raissi M., Perdikaris P., Karniadakis G. E. (2019). *Physics-informed neural networks: A deep learning
+  framework for solving forward and inverse problems involving nonlinear partial differential equations*.
+
+---
+
+## 5. Ouverture : données terrain et PINN
+
+Ce simulateur est aujourd'hui un **jumeau générique** : la mer est synthétique et les caractéristiques du
+navire sont saisies à la main. Pour devenir le jumeau d'un navire **réel**, il doit se recaler sur des
+observations. C'est précisément le terrain des réseaux de neurones informés par la physique (PINN).
+
+### 5.1 Le problème visé : identifier ce qu'on ne connaît pas
+
+Les grandeurs les plus incertaines du modèle sont aussi celles qui pèsent le plus sur la sécurité :
+
+- **GM_T**, qui dépend du chargement, des carburants, de l'eau embarquée, et change au cours d'une marée ;
+- **l'amortissement de roulis**, fortement non linéaire (quilles de roulis, viscosité), réduit ici à un
+  taux ζ fixe ;
+- les **masses ajoutées**, approchées par des formules empiriques.
+
+Un PINN apprend la réponse du navire $\varphi(t)$ en minimisant à la fois l'écart aux mesures et le
+résidu de l'équation de Cummins, dans laquelle ces grandeurs sont des **paramètres entraînables**.
+Par exemple, pour le roulis :
+
+$$
+\mathcal{L} = \underbrace{\big\|\varphi_{NN} - \varphi_{mes}\big\|^2}_{\text{données}}
++ \lambda\,\underbrace{\big\|(I_{xx}+A_{44})\ddot\varphi_{NN} + B_{44}\dot\varphi_{NN}
++ B_{44q}|\dot\varphi_{NN}|\dot\varphi_{NN} + \rho g\nabla\,GM_T\,\varphi_{NN} - F_4\big\|^2}_{\text{physique}}
+$$
+
+La physique sert de garde-fou quand les données sont rares ou bruitées, et les données corrigent la
+physique là où elle est approximative. Le résultat est un modèle **calé sur le navire réel**, dont les
+paramètres identifiés ($GM_T$, $B_{44}$, $B_{44q}$) ont un sens physique et s'injectent directement
+dans `BoatParams`.
+
+### 5.2 Données nécessaires
+
+| Donnée | Rôle | Sources possibles |
+|--------|------|-------------------|
+| Mouvements du navire (roulis, tangage, pilonnement), ≥ 10 Hz | sortie observée | centrale inertielle / MRU embarquée ; à défaut, IMU d'un smartphone fixé à bord (application *phyphox*) ; essais en bassin sur maquette |
+| État de mer (spectre, $H_s$, $T_p$, direction) | excitation | bouées : [CANDHIS](https://candhis.cerema.fr) (côtes françaises), [CDIP](https://cdip.ucsd.edu), [NOAA NDBC](https://www.ndbc.noaa.gov) ; modèles : [Copernicus Marine](https://marine.copernicus.eu), réanalyse ERA5 (Copernicus Climate Data Store) |
+| Vitesse et cap | fréquence de rencontre | GPS de bord, ou historiques AIS |
+| Caractéristiques du navire (L, B, T, déplacement) | modèle a priori | plans et livret de stabilité ; l'essai d'inclinaison fournit un GM de référence pour valider l'identification |
+| Coefficients hydrodynamiques de référence | initialisation, validation | calcul BEM avec [Capytaine](https://github.com/capytaine/capytaine) sur le maillage de coque |
+
+### 5.3 Démarche envisagée
+
+1. **Validation sur données synthétiques.** Le module `Simulation` tournant sans interface, on simule un
+   navire « vrai » aux paramètres cachés, on bruite ses mouvements, et on vérifie que le PINN retrouve
+   $GM_T$ et l'amortissement.
+2. **Données terrain.** On couple les mouvements enregistrés à bord avec la bouée ou la réanalyse la plus
+   proche, puis on identifie les paramètres du navire réel.
+3. **Retour dans le jumeau.** Un bouton « Calibrer sur mesures » met à jour le navire à chaud ; une coque
+   fantôme peut afficher en parallèle le modèle générique et le modèle calibré pour visualiser l'écart.
+4. **Surveillance.** Une identification glissante de $GM_T$ au fil du voyage permettrait de détecter une
+   perte de stabilité (carène liquide, givrage, désarrimage) ou l'approche d'un roulis paramétrique,
+   avant qu'ils ne deviennent dangereux.
+
+Au-delà, si des calculs haute fidélité (BEM, CFD) sont disponibles, un **opérateur neuronal**
+(FNO, DeepONet) pourrait apprendre la correspondance *géométrie de coque → coefficients
+hydrodynamiques* et rendre le choix du navire physiquement fidèle tout en restant en temps réel.
